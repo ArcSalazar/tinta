@@ -16,10 +16,13 @@ namespace qmd {
 
 // Extensions that get the live/broken file-reference treatment. The
 // plain-path scanner, explicit [text](target) links, and the click
-// handler (#162) all share this gate.
+// handler (#162) all share this gate. .pdf rides along so a relative
+// link resolves against the document and opens with the registered
+// viewer instead of going through the generic URL route
 const char* const kFileRefExtensions[] = {
     ".markdown", ".json", ".yaml", ".toml", ".mmd", ".yml",
     ".ini",      ".csv",  ".log",  ".txt",  ".md",  ".xml",
+    ".pdf",
 };
 
 static bool endsWithNoCase(const std::string& s, const char* suffix) {
@@ -38,6 +41,10 @@ bool fileRefKnownExtension(const std::string& path) {
 bool fileRefIsMarkdown(const std::string& path) {
     return endsWithNoCase(path, ".md") || endsWithNoCase(path, ".mmd") ||
            endsWithNoCase(path, ".markdown");
+}
+
+bool fileRefIsExternal(const std::string& path) {
+    return endsWithNoCase(path, ".pdf");
 }
 
 // Parser context for MD4C callbacks

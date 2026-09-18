@@ -122,6 +122,10 @@ bool fileRefKnownExtension(const std::string& path);
 // in a tab, while other known text files open with their registered
 // application (#162)
 bool fileRefIsMarkdown(const std::string& path);
+// True for binary documents Tinta cannot show itself (.pdf): a live link
+// hands the file to its registered application, a missing one stays a
+// ghost with no create-file offer, and the hover preview is skipped
+bool fileRefIsExternal(const std::string& path);
 
 // Utility functions
 std::string elementTypeToString(ElementType type);

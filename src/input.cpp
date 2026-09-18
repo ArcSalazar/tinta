@@ -1412,11 +1412,14 @@ void handleMouseMove(App& app, HWND hwnd, LPARAM lParam) {
         app.startPageHover = 0;
     }
 
-    // Link peek: dwelling on a local .md link arms the preview timer
+    // Link peek: dwelling on a local .md link arms the preview timer;
+    // binary targets such as .pdf have nothing to preview
     if (app.hoveredLink != prevHoveredLink) {
         clearLinkPeek(app);
         bool peekable = !app.editMode &&
-                        (app.hoveredLink.rfind("fileref-ok:", 0) == 0 ||
+                        ((app.hoveredLink.rfind("fileref-ok:", 0) == 0 &&
+                          !qmd::fileRefIsExternal(qmd::splitLinkTarget(
+                              app.hoveredLink.substr(11)).path)) ||
                          app.hoveredLink.rfind("wiki:", 0) == 0);
         if (peekable) {
             app.linkPeekUrl = app.hoveredLink;
@@ -2304,15 +2307,43 @@ static void navRecordJump(App& app, const std::string& fromPath,
     app.navForward.clear();
 }
 
+// A ghost reference: text files can be created on the spot; binary
+// documents need an existing file from their own application.
+static void offerCreateFileRef(App& app, const std::string& url) {
+    std::string path = qmd::splitLinkTarget(url).path;
+    if (qmd::fileRefIsExternal(path)) {
+        auto wide = toWide(path);
+        signalPushKey(app, SIG_WARN, SIGI_FILE, "toast.file_missing",
+                      std::filesystem::path(wide).filename().wstring(), wide);
+        return;
+    }
+    app.createRefPath = std::move(path);
+    app.createRefPending = true;
+}
+
 // A live reference: markdown joins the window as a tab (#127), other
-// text files open with their registered application (#162). Returns
+// files open with their registered application (#162, #237). Returns
 // true when the target opened inside Tinta.
 static bool openFileRefTarget(App& app, HWND hwnd, const std::string& url) {
     const auto target = qmd::splitLinkTarget(url);
     const auto& path = target.path;
     if (!qmd::fileRefIsMarkdown(path)) {
-        ShellExecuteW(hwnd, L"open", toWide(path).c_str(), nullptr,
-                      nullptr, SW_SHOWNORMAL);
+        const auto wide = toWide(path);
+        SHELLEXECUTEINFOW info{};
+        info.cbSize = sizeof(info);
+        info.fMask = SEE_MASK_FLAG_NO_UI | SEE_MASK_NOASYNC;
+        info.hwnd = hwnd;
+        info.lpVerb = L"open";
+        info.lpFile = wide.c_str();
+        info.nShow = SW_SHOWNORMAL;
+        if (!ShellExecuteExW(&info)) {
+            DWORD error = GetLastError();
+            const char* message = (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND)
+                ? "toast.file_missing" : error == ERROR_NO_ASSOCIATION
+                ? "toast.file_no_app" : "toast.file_open_failed";
+            signalPushKey(app, SIG_ERROR, SIGI_FILE, message,
+                          std::filesystem::path(wide).filename().wstring(), wide);
+        }
         return false;
     }
     const auto fromPath = app.currentFile;
@@ -3283,8 +3314,7 @@ void handleMouseUp(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
                 } else if (app.hoveredLink.rfind("fileref-missing:", 0) ==
                            0) {
                     // Ghost reference: offer to create the target
-                    app.createRefPath = qmd::splitLinkTarget(app.hoveredLink.substr(16)).path;
-                    app.createRefPending = true;
+                    offerCreateFileRef(app, app.hoveredLink.substr(16));
                 } else {
                     handleLinkClick(app);
                 }
@@ -3308,8 +3338,7 @@ void handleMouseUp(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
         if (app.hoveredLink.rfind("fileref-ok:", 0) == 0) {
             openFileRefTarget(app, hwnd, app.hoveredLink.substr(11));
         } else if (app.hoveredLink.rfind("fileref-missing:", 0) == 0) {
-            app.createRefPath = qmd::splitLinkTarget(app.hoveredLink.substr(16)).path;
-            app.createRefPending = true;
+            offerCreateFileRef(app, app.hoveredLink.substr(16));
         } else {
             handleLinkClick(app);
         }
@@ -4212,7 +4241,9 @@ void handleLinkPeekTimer(App& app, HWND hwnd) {
     std::error_code ec;
     fs::path target;
     if (app.linkPeekUrl.rfind("fileref-ok:", 0) == 0) {
-        target = toWide(qmd::splitLinkTarget(app.linkPeekUrl.substr(11)).path);
+        const auto path = qmd::splitLinkTarget(app.linkPeekUrl.substr(11)).path;
+        if (qmd::fileRefIsExternal(path)) return;  // nothing to render for .pdf
+        target = toWide(path);
     } else if (app.linkPeekUrl.rfind("wiki:", 0) == 0 &&
                !app.currentFile.empty()) {
         std::wstring t = toWide(app.linkPeekUrl.substr(5));

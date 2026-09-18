@@ -1,14 +1,17 @@
 #include "d2d_init.h"
 #include "editor.h"
 #include "inline_style.h"
+#include "i18n.h"
 #include "input.h"
 #include "link_target.h"
 #include "render.h"
 #include "settings.h"
+#include "signals.h"
 #include "tabs.h"
 #include "utils.h"
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <windowsx.h>
@@ -50,6 +53,82 @@ void landed(App& app, const std::string& id) {
     }
     check(found, "destination heading exists");
     check(app.pendingScrollRestore < 0, "explicit fragment wins over saved reading position");
+}
+
+// Based on the PDF regression cases supplied by @msaitov in #237.
+void pdfLinks(App& app) {
+    namespace fs = std::filesystem;
+    const auto root = fs::path(TINTA_FRAGMENT_FIXTURE).parent_path().parent_path() / L"pdf-links";
+    const auto document = root / L"docs/index.md";
+    const auto pdf = (root / L"pdf/report 2026.pdf").lexically_normal();
+    const auto unicodePdf = (root / L"pdf/\u043e\u0442\u0447\u0451\u0442 \u4e2d\u6587 caf\u00e9.pdf").lexically_normal();
+    tabOpenPath(app, app.hwnd, toUtf8(document.wstring()), true);
+    const auto initialTabs = app.tabs.size();
+    for (int theme : {0, 5}) for (int width : {650, 1050}) {
+        applyTheme(app, theme); app.width = width; app.layoutDirty = true;
+        app.scrollY = app.targetScrollY = 0;
+        ensureLayoutComplete(app);
+        check(std::count_if(app.root->children.begin(), app.root->children.end(),
+              [](const auto& e) { return e->type == qmd::ElementType::Table; }) == 1 && app.codeBlocks.size() == 1,
+              "PDF fixture retains mixed table and code content");
+        for (const auto& path : {pdf, unicodePdf}) {
+            for (const auto& url : {qmd::encodeLinkTarget({toUtf8(path.wstring()), {}, false}),
+                                   qmd::encodeLinkTarget({toUtf8(path.lexically_relative(document.parent_path()).generic_wstring()), {}, false})}) {
+                auto live = link(app, url);
+                check(live.rfind("fileref-ok:", 0) == 0, "existing absolute/relative PDF is a live file reference");
+                auto resolved = qmd::splitLinkTarget(live.substr(11)).path;
+                check(fs::path(toWide(resolved)) == path && qmd::fileRefIsExternal(resolved),
+                      "PDF path resolves against document folder with spaces and Unicode intact");
+                app.linkPeekUrl = app.hoveredLink = live;
+                handleLinkPeekTimer(app, app.hwnd);
+                check(!app.linkPeekActive, "PDF never reaches the text preview renderer");
+                app.linkPeekUrl.clear();
+            }
+        }
+        // Exercise hover classification using the actual parsed Markdown hit box.
+        auto first = app.linkRects.front();
+        app.hoveredLink.clear();
+        handleMouseMove(app, app.hwnd, MAKELPARAM(static_cast<int>(first.bounds.left + 3),
+                                                static_cast<int>(first.bounds.top + 3)));
+        check(app.hoveredLink.rfind("fileref-ok:", 0) == 0 && app.linkPeekUrl.empty(),
+              "hovering a parsed PDF link does not arm the peek timer");
+        for (bool selectionPath : {false, true}) {
+            app.signalChips.clear();
+            click(app, "../pdf/missing%20report.PDF", selectionPath);
+            check(!app.createRefPending && !fs::exists(root / L"pdf/missing report.PDF"),
+                  "missing uppercase PDF is never offered as a new text file");
+            check(!app.signalChips.empty() && app.signalChips.back().text == tr(app, "toast.file_missing"),
+                  "both click paths report a missing PDF");
+        }
+        check(link(app, "notes.txt").rfind("fileref-ok:", 0) == 0 &&
+              link(app, "https://example.com/a.pdf") == "https://example.com/a.pdf" &&
+              link(app, "https://example.com/a.pdf#page=3") == "https://example.com/a.pdf#page=3",
+              "text references and remote PDF URLs keep their existing routing");
+        check(link(app, "../pdf/report%202026.pdf#page=3") == "../pdf/report%202026.pdf#page=3",
+              "PDF page-fragment support is not changed by the file-link fix");
+        app.linkPeekUrl = app.hoveredLink = link(app, "notes.md#destination");
+        handleLinkPeekTimer(app, app.hwnd);
+        check(app.linkPeekActive, "Markdown hover preview still works next to PDF links");
+        app.linkPeekActive = false; app.linkPeekUrl.clear();
+        click(app, "missing-notes.txt");
+        check(app.createRefPending, "missing text links still offer creation");
+        app.createRefPending = false;
+    }
+    // A file can disappear after layout cached it as live. Exercise the real
+    // Unicode shell launch failure, suppressing system dialogs and external apps.
+    const auto vanished = fs::current_path() / (L"vanished \u4e2d\u6587 " + std::to_wstring(GetCurrentProcessId()) + L".pdf");
+    const auto url = qmd::encodeLinkTarget({toUtf8(vanished.wstring()), {}, false});
+    { std::ofstream out(vanished, std::ios::binary); out << "%PDF-1.4\n"; }
+    check(link(app, url).rfind("fileref-ok:", 0) == 0, "launch-failure fixture is initially live");
+    std::error_code ec;
+    check(fs::remove(vanished, ec), "launch-failure fixture is removed before clicking");
+    app.signalChips.clear();
+    click(app, url);
+    check(!app.signalChips.empty() && app.signalChips.back().severity == SIG_ERROR &&
+          app.signalChips.back().traySub == vanished.wstring(),
+          "failed Unicode shell launch reports the target rather than silently doing nothing");
+    check(app.tabs.size() == initialTabs && !app.createRefPending,
+          "PDF handling never creates an editor tab or empty document");
 }
 }
 
@@ -136,6 +215,8 @@ int runFileFragmentTests() {
               "source heading is visible with preview shown or hidden");
     }
     app.editorText = original; app.editorDirty = false;
+    exitEditMode(app);
+    pdfLinks(app);
     DestroyWindow(app.hwnd); app.hwnd = nullptr; state.reset(); CoUninitialize();
     std::cout << "File fragments: " << failures << " failures\n";
     return failures ? 1 : 0;
