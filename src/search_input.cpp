@@ -157,7 +157,7 @@ void focusSourceEditor(App& app) {
     releaseSearchInput(app);
 }
 bool sourceEditorHasFocus(const App& app) {
-    return app.editMode && !app.tableEditActive && !(app.showSearch && app.searchActive);
+    return app.editMode && !app.editorReadingPreview && !app.tableEditActive && !(app.showSearch && app.searchActive);
 }
 void focusSearchInput(App& app, bool replace) {
     bool reacquire = !app.searchActive || app.tableEditActive;
@@ -171,6 +171,7 @@ void focusSearchInput(App& app, bool replace) {
     updateBlinkTimer(app);
 }
 void openSearchInput(App& app, bool replace) {
+    if (app.editorReadingPreview) setEditorReadingPreview(app,false);
     if (!app.showSearch) {
         app.searchAnimation = 0;
         app.searchQuery.clear();
@@ -205,6 +206,7 @@ void closeSearchInput(App& app) {
 }
 
 bool searchInputKeyDown(App& app, HWND hwnd, WPARAM key) {
+    if (!shortcutModifiersAllowed(static_cast<unsigned>(key))) return false;
     bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
     bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
     int field = activeField(app);

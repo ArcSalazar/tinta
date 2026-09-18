@@ -139,6 +139,7 @@ void focusTransfers(App& app) {
     auto reset = [&]() {
         closeSearchInput(app); tableEditCancel(app);
         app.lastClickTime = {}; app.clickCount = 0;
+        app.editMode = false; // Explicitly reload the fixture, not resume a live preview.
         enterEditMode(app); app.editorShowPreview = true; app.editorScrollY = app.scrollY = 0;
         editorReparse(app); ensureLayoutComplete(app);
     };
@@ -148,6 +149,7 @@ void focusTransfers(App& app) {
             auto rect = cell.rect;
             click(app, documentViewportX(app)+(rect.left+rect.right)/2-app.scrollX,
                   (rect.top+rect.bottom)/2-app.scrollY);
+            key(app,VK_END,0,true); // Mouse placement now honors the clicked position (#236).
             return app.tableEditActive;
         }
         return false;

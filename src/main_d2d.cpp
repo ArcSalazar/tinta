@@ -157,7 +157,7 @@ void render(App& app) {
     }
 
     // Sync preview scroll to editor scroll position using source-offset anchors
-    if (editorPreviewVisible(app) && !app.scrollAnchors.empty() &&
+    if (editorPreviewVisible(app) && !app.editorReadingPreview && !app.scrollAnchors.empty() &&
         !app.editorLineByteOffsets.empty()) {
         // Find the editor's top visible line (row-aware in wrap mode)
         int topLine = (int)editorTopVisibleLine(app);
@@ -230,7 +230,7 @@ void render(App& app) {
         float previewWidth = documentViewportWidth(app);
 
         // Render editor (left pane; full width when the preview is hidden)
-        renderEditor(app, editorWidth);
+        if (!app.editorReadingPreview) renderEditor(app, editorWidth);
 
         // The floating sheet (design 10a): desk, shadow, and sheet
         // surface first, then the document clips into the sheet
@@ -247,7 +247,7 @@ void render(App& app) {
             D2D1::Matrix3x2F::Translation(previewX, 0) * originalTransform);
 
         // The caret block's accent wash under the document content
-        renderPreviewCaretBlock(app, previewWidth);
+        if (!app.editorReadingPreview) renderPreviewCaretBlock(app, previewWidth);
 
         goto render_document;
     }
@@ -1108,8 +1108,9 @@ render_document:
     // Edit-mode tool rail (design t8): covers the strip's left corner
     // and the old gutter column, so it draws above both
     if (app.editMode) {
-        renderEditRail(app);
+        if (!app.editorReadingPreview) renderEditRail(app);
         renderEditCtxMenu(app);
+        renderEditorReadingButton(app);
     }
     if (app.showThemeChooser) renderThemeChooser(app);
     if (app.showHelp) renderHelpOverlay(app);
@@ -1380,6 +1381,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             break;
 
         case WM_CLOSE:
+            if (app) tableEditCommit(*app);
             // Unsaved buffers (active or parked in tabs) get the dialog
             // before the window may close; tabs stay open so the session
             // save still remembers them
@@ -1531,6 +1533,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             break;
 
         case WM_CAPTURECHANGED:
+            if (app && (HWND)lParam != hwnd) tableEditMouseUp(*app);
             if (app && (HWND)lParam != hwnd) searchInputMouseUp(*app);
             if (app && (HWND)lParam != hwnd && app->frontmatterDrag >= 0) {
                 app->frontmatterDrag = app->frontmatterDrop = -1;
@@ -1546,6 +1549,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
 
         case WM_CANCELMODE:
+            if (app) tableEditMouseUp(*app);
             if (app) searchInputMouseUp(*app);
             if (app && app->frontmatterDrag >= 0) {
                 app->frontmatterDrag = app->frontmatterDrop = -1;
@@ -1593,6 +1597,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             // Alt+Left / Alt+Right mirror the mouse side buttons
             if (app && (lParam & (1 << 29)) &&
+                !(GetKeyState(VK_CONTROL) & 0x8000) && !(GetKeyState(VK_SHIFT) & 0x8000) &&
                 (wParam == VK_LEFT || wParam == VK_RIGHT)) {
                 if (wParam == VK_LEFT) navigateBack(*app, hwnd);
                 else navigateForward(*app, hwnd);

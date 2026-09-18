@@ -1971,7 +1971,7 @@ void renderHelpOverlay(App& app) {
         {L"Ctrl+S",       tr(app, "help.edit.save")},
         {L"Ctrl+E",       tr(app, "help.edit.preview")},
         {L"Ctrl+W",       tr(app, "help.edit.word_wrap")},
-        {L"ESC ESC",      tr(app, "help.edit.exit_edit")},
+        {L"Esc / Ctrl+Shift+E", tr(app, "editor.read_help")},
     };
 
     const HelpEntry generalEntries[] = {

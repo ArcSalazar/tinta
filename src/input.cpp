@@ -847,7 +847,7 @@ void handleMouseWheel(App& app, HWND hwnd, WPARAM wParam, LPARAM) {
     // Edit mode: the wheel scrolls the editor from either pane — the preview
     // follows through the scroll-anchor sync, so the panes cannot drift
     // apart and both sides always respond (#77)
-    if (app.editMode) {
+    if (app.editMode && !app.editorReadingPreview) {
         float sepX = app.editorShowPreview
             ? app.width * app.editorSplitRatio
             : static_cast<float>(app.width);
@@ -991,6 +991,8 @@ void cancelDocumentScrollbarDrag(App& app, HWND hwnd) {
 }
 
 void handleMouseMove(App& app, HWND hwnd, LPARAM lParam) {
+    if (tableEditMouseMove(app, static_cast<float>(GET_X_LPARAM(lParam)),
+                              static_cast<float>(GET_Y_LPARAM(lParam)))) return;
     if (searchInputMouseMove(app, static_cast<float>(GET_X_LPARAM(lParam)),
                             static_cast<float>(GET_Y_LPARAM(lParam)))) return;
     bool mouseMoved = app.mouseX != GET_X_LPARAM(lParam) || app.mouseY != GET_Y_LPARAM(lParam);
@@ -1942,6 +1944,12 @@ void handleMouseDown(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
     if (app.editMode) {
         int x = GET_X_LPARAM(lParam);
         int y = GET_Y_LPARAM(lParam);
+        auto readButton=editorReadingButtonRect(app);
+        if (x>=readButton.left && x<=readButton.right && y>=readButton.top && y<=readButton.bottom) {
+            setEditorReadingPreview(app,!app.editorReadingPreview);
+            app.swallowNextMouseUp=true;
+            return;
+        }
         // Everything left of the preview edge — pane and seam — belongs
         // to the editor handler (the seam is the split handle)
         if ((float)x < documentViewportX(app)) {
@@ -1960,7 +1968,7 @@ void handleMouseDown(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
         }
         // In-place table editing (#148): cells and the + affordances
         // catch preview presses before selection handling
-        if (app.editorShowPreview) {
+        if (app.editorShowPreview && !app.editorReadingPreview) {
             float docX = (float)x - documentViewportX(app) + app.scrollX;
             float docY = (float)y + app.scrollY;
             if (tableEditMouseDown(app, hwnd, docX, docY)) {
@@ -2658,6 +2666,7 @@ static void toggleFitBlock(App& app, HWND hwnd, unsigned key) {
 }
 
 void handleMouseUp(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
+    if (app.tableEditSelecting) { tableEditMouseUp(app); return; }
     if (app.searchSelectingField >= 0) { searchInputMouseUp(app); return; }
     if (app.scrollbarDragging || app.hScrollbarDragging) {
         app.mouseX = GET_X_LPARAM(lParam);
@@ -3350,6 +3359,7 @@ static void toggleZenMode(App& app, HWND hwnd) {
 }
 
 bool handleKeyDown(App& app, HWND hwnd, WPARAM wParam) {
+    if (!shortcutModifiersAllowed(static_cast<unsigned>(wParam))) return false;
     if (app.panelResize.panel != SidePanel::None) {
         if (wParam == VK_ESCAPE) sidePanelResizeEnd(app, hwnd, true);
         return true;
@@ -3616,10 +3626,11 @@ bool handleKeyDown(App& app, HWND hwnd, WPARAM wParam) {
             InvalidateRect(hwnd, nullptr, FALSE);
             return false;
         }
+        const bool wasReading=app.editorReadingPreview;
         handleEditorKeyDown(app, hwnd, wParam);
         // Save As runs a modal loop: Ctrl may already be released when it
         // returns. Do not translate its original S into newly typed text (#206).
-        return ctrl && wParam == 'S';
+        return (ctrl && wParam == 'S') || (wasReading && !app.editorReadingPreview);
     }
 
     // Folder browser path/name input captures the keyboard while active
@@ -4092,6 +4103,10 @@ void handleCharInput(App& app, HWND hwnd, WPARAM wParam) {
     // Edit mode: ':' enters edit mode, otherwise route to editor
     if (app.editMode) {
         // An open table cell editor takes the typing (#148)
+        if (app.editorReadingPreview && keyBindingMatches(app.keymap[KA_EDIT],static_cast<unsigned>(wParam),true)) {
+            setEditorReadingPreview(app,false);
+            return;
+        }
         if (tableEditChar(app, (wchar_t)wParam)) return;
         handleEditorCharInput(app, hwnd, wParam);
         return;

@@ -70,6 +70,7 @@ void parkActiveEditBuffer(App& app) {
     tab.lastWrite = app.lastFileWriteTime;  // external-change detection
 
     app.editMode = false;
+    app.editorReadingPreview = false;
     app.editorDirty = false;
     app.clearEditorLineLayoutCache();
     app.editorText.clear();
@@ -207,6 +208,7 @@ void tabOpenPath(App& app, HWND hwnd, const std::string& utf8Path,
 void tabCloseIndex(App& app, HWND hwnd, int index) {
     tabsInit(app);
     if (index < 0 || index >= (int)app.tabs.size()) return;
+    if (index==app.activeTab) tableEditCommit(app);
 
     // A dirty buffer routes through the unsaved-changes dialog (#106):
     // activate the tab, open the dialog, and finish the close from

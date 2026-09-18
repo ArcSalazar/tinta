@@ -43,6 +43,9 @@ struct Entry {
 // Note: kept as a plain array (not unordered_map) on purpose. ~80 entries,
 // linear scan is cache-friendly and avoids a static-init ordering fiasco.
 const Entry kEntries[] = {
+    { "editor.read", L"Read \xb7 Esc", L"\u9605\u8bfb \xb7 Esc", L"\u8aad\u3080 \xb7 Esc", L"\uc77d\uae30 \xb7 Esc" },
+    { "editor.resume", L"Edit \xb7 Esc", L"\u7f16\u8f91 \xb7 Esc", L"\u7de8\u96c6 \xb7 Esc", L"\ud3b8\uc9d1 \xb7 Esc" },
+    { "editor.read_help", L"Read unsaved changes / return to editing", L"\u9884\u89c8\u672a\u4fdd\u5b58\u7684\u66f4\u6539 / \u8fd4\u56de\u7f16\u8f91", L"\u672a\u4fdd\u5b58\u306e\u5909\u66f4\u3092\u8aad\u3080 / \u7de8\u96c6\u306b\u623b\u308b", L"\uc800\uc7a5\ud558\uc9c0 \uc54a\uc740 \ubcc0\uacbd \uc0ac\ud56d \uc77d\uae30 / \ud3b8\uc9d1\uc73c\ub85c \ub3cc\uc544\uac00\uae30" },
     { "ctx.open", L"Open File...", L"\u6253\u5F00\u6587\u4EF6...", L"\u30D5\u30A1\u30A4\u30EB\u3092\u958B\u304F...", L"\uD30C\uC77C \uC5F4\uAE30..." },
     { "ctx.save", L"Save", L"\u4FDD\u5B58", L"\u4FDD\u5B58", L"\uC800\uC7A5" },
     { "ctx.save_as", L"Save As...", L"\u53E6\u5B58\u4E3A...", L"\u540D\u524D\u3092\u4ED8\u3051\u3066\u4FDD\u5B58...", L"\uB2E4\uB978 \uC774\uB984\uC73C\uB85C \uC800\uC7A5..." },

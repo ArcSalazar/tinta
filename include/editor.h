@@ -12,6 +12,9 @@ void enterQuickNoteMode(App& app);
 void enterRecoveredDraft(App& app, HWND hwnd, const std::string& content,
                          const std::string& origPath);
 void exitEditMode(App& app);
+void setEditorReadingPreview(App& app, bool reading);
+D2D1_RECT_F editorReadingButtonRect(const App& app);
+void renderEditorReadingButton(App& app);
 
 // Editor input handlers
 void handleEditorKeyDown(App& app, HWND hwnd, WPARAM wParam);

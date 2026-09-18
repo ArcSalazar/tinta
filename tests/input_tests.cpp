@@ -154,6 +154,7 @@ void settingsDismissal() {
 }
 
 int runTabDropTests();
+int runTableInputTests();
 int runSearchInputTests();
 int runWrappedCursorTests();
 int runFileFragmentTests();
@@ -164,6 +165,7 @@ int runImageTests(const char* remoteBase);
 int runTabDropLaunchProbe();
 
 int main(int argc, char** argv) {
+    if (argc == 2 && std::string(argv[1]) == "--table-input-tests") return runTableInputTests();
     if (argc == 2 && std::string(argv[1]) == "--editor-context-tests") return runEditorContextTests();
     if (argc == 2 && std::string(argv[1]) == "--file-fragment-tests") return runFileFragmentTests();
     if (argc == 2 && std::string(argv[1]) == "--wrapped-cursor-tests") return runWrappedCursorTests();

@@ -1,9 +1,11 @@
 #include "search.h"
 #include "tableedit.h"
 #include "editor.h"
+#include "input.h"
 #include "utils.h"
 
 #include <algorithm>
+#include <cwctype>
 #include <string>
 #include <vector>
 
@@ -173,7 +175,10 @@ std::wstring sanitizeCellText(const std::wstring& text) {
         if (c == L'\n' || c == L'\r') {
             out += L' ';
         } else if (c == L'|') {
-            out += L"\\|";
+            size_t slashes=0;
+            for(size_t i=out.size(); i && out[i-1]==L'\\'; --i) ++slashes;
+            if (slashes%2==0) out+=L'\\';
+            out+=c;
         } else {
             out += c;
         }
@@ -188,11 +193,16 @@ bool currentTable(App& app, std::string& src, TableLines& t) {
 }
 
 void closeCellEditor(App& app) {
+    tableEditMouseUp(app);
     app.tableEditActive = false;
     app.tableEditRow = -1;
     app.tableEditCol = -1;
     app.tableEditText.clear();
     app.tableEditCaret = 0;
+    app.tableEditAnchor = 0;
+    app.tableEditScrollY = 0;
+    app.tableEditUndo.clear();
+    app.tableEditRedo.clear();
 }
 
 // Load cell (row, col) of the table at tableSrc into the inline editor
@@ -209,6 +219,10 @@ bool openCellEditor(App& app, size_t tableSrc, int row, int col) {
     app.tableEditCol = col;
     app.tableEditText = toWide(src.substr(s, e - s));
     app.tableEditCaret = app.tableEditText.size();
+    app.tableEditAnchor = app.tableEditCaret;
+    app.tableEditScrollY = 0;
+    app.tableEditUndo.clear();
+    app.tableEditRedo.clear();
     resetCursorBlink(app);
     return true;
 }
@@ -298,6 +312,109 @@ const App::TableCellRect* activeCellRect(const App& app) {
         }
     }
     return nullptr;
+}
+
+using Microsoft::WRL::ComPtr;
+
+struct CellLayout {
+    ComPtr<IDWriteTextLayout> text;
+    D2D1_RECT_F box{}; // document coordinates, inside the cell padding
+};
+CellLayout cellLayout(App& app) {
+    CellLayout result;
+    const auto* cell = activeCellRect(app);
+    if (!cell || !app.dwriteFactory || !app.textFormat) return result;
+    float pad = 8.0f * app.contentScale * app.zoomFactor;
+    result.box = {cell->rect.left+pad, cell->rect.top+pad,
+                  std::max(cell->rect.left+pad+1, cell->rect.right-pad),
+                  std::max(cell->rect.top+pad+app.textFormat->GetFontSize()*1.4f, cell->rect.bottom-pad)};
+    app.dwriteFactory->CreateTextLayout(app.tableEditText.data(),
+        static_cast<UINT32>(app.tableEditText.size()), app.textFormat,
+        result.box.right-result.box.left, 1e7f, result.text.GetAddressOf());
+    if (result.text) {
+        result.text->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+        ComPtr<IDWriteTextLayout2> fallback;
+        if (app.fontFallback && SUCCEEDED(result.text.As(&fallback))) fallback->SetFontFallback(app.fontFallback);
+    }
+    return result;
+}
+DWRITE_HIT_TEST_METRICS caretMetrics(App& app, IDWriteTextLayout* layout, float& x, float& y) {
+    DWRITE_HIT_TEST_METRICS hit{};
+    if (layout) layout->HitTestTextPosition(static_cast<UINT32>(app.tableEditCaret), FALSE, &x, &y, &hit);
+    if (hit.height <= 0 && app.textFormat) hit.height = app.textFormat->GetFontSize()*1.4f;
+    return hit;
+}
+void followCaret(App& app, const CellLayout& layout) {
+    float x=0, y=0;
+    auto hit=caretMetrics(app, layout.text.Get(), x, y);
+    float height=layout.box.bottom-layout.box.top;
+    if (y < app.tableEditScrollY) app.tableEditScrollY=y;
+    if (y+hit.height > app.tableEditScrollY+height) app.tableEditScrollY=y+hit.height-height;
+    app.tableEditScrollY=std::max(0.0f,app.tableEditScrollY);
+}
+size_t hitCell(App& app, const CellLayout& layout, float x, float y) {
+    if (!layout.text) return 0;
+    BOOL trailing=FALSE, inside=FALSE;
+    DWRITE_HIT_TEST_METRICS hit{};
+    layout.text->HitTestPoint(x-layout.box.left, y-layout.box.top+app.tableEditScrollY, &trailing, &inside, &hit);
+    return std::min(app.tableEditText.size(), static_cast<size_t>(hit.textPosition)+(trailing ? hit.length : 0));
+}
+size_t stepCell(App& app, size_t pos, bool forward) {
+    auto layout=cellLayout(app);
+    if (layout.text) {
+        UINT32 count=0;
+        layout.text->GetClusterMetrics(nullptr,0,&count);
+        std::vector<DWRITE_CLUSTER_METRICS> clusters(count);
+        if (count && SUCCEEDED(layout.text->GetClusterMetrics(clusters.data(),count,&count))) {
+            size_t start=0;
+            for (const auto& cluster:clusters) {
+                size_t end=start+cluster.length;
+                if ((forward && end>pos) || (!forward && end>=pos)) return forward ? end : start;
+                start=end;
+            }
+        }
+    }
+    return forward ? std::min(pos+1,app.tableEditText.size()) : (pos ? pos-1 : 0);
+}
+size_t wordCell(App& app, size_t pos, bool forward) {
+    const auto& text=app.tableEditText;
+    auto category=[&](size_t at){return iswspace(text[at]) ? 0 : (iswalnum(text[at]) || text[at]==L'_' ? 1 : 2);};
+    if (forward) {
+        if (pos==text.size()) return pos;
+        int kind=category(pos);
+        while(pos<text.size() && category(pos)==kind) pos=stepCell(app,pos,true);
+        while(pos<text.size() && !category(pos)) pos=stepCell(app,pos,true);
+    } else {
+        while(pos && !category(pos-1)) pos=stepCell(app,pos,false);
+        if (!pos) return 0;
+        int kind=category(pos-1);
+        while(pos && category(pos-1)==kind) pos=stepCell(app,pos,false);
+    }
+    return pos;
+}
+void insertCell(App& app, const std::wstring& text) {
+    size_t start=std::min(app.tableEditCaret,app.tableEditAnchor);
+    size_t end=std::max(app.tableEditCaret,app.tableEditAnchor);
+    if (start==end && text.empty()) return;
+    app.tableEditUndo.push_back({app.tableEditText,app.tableEditCaret,app.tableEditAnchor});
+    app.tableEditRedo.clear();
+    app.tableEditText.replace(start,end-start,text);
+    app.tableEditCaret=app.tableEditAnchor=start+text.size();
+}
+void cellChanged(App& app) {
+    auto layout=cellLayout(app);
+    followCaret(app,layout);
+    resetCursorBlink(app);
+    InvalidateRect(app.hwnd,nullptr,FALSE);
+}
+void placeCellCaret(App& app, float x, float y) {
+    auto layout=cellLayout(app);
+    app.tableEditCaret=hitCell(app,layout,x,y);
+    if (!(GetKeyState(VK_SHIFT)&0x8000)) app.tableEditAnchor=app.tableEditCaret;
+    app.tableEditSelecting=true;
+    app.hasSelection=app.selecting=false;
+    SetCapture(app.hwnd);
+    cellChanged(app);
 }
 
 }  // namespace
@@ -400,13 +517,14 @@ bool tableEditMouseDown(App& app, HWND hwnd, float docX, float docY) {
     if (app.tableEditActive) {
         if (cell && cell->tableSrc == app.tableEditSrc &&
             cell->row == app.tableEditRow && cell->col == app.tableEditCol) {
-            return true;  // click inside the open editor keeps focus
+            placeCellCaret(app,docX,docY);
+            return true;
         }
         tableEditCommit(app);
         // fall through: the same click may open the next cell
     }
     if (cell) {
-        openCellEditor(app, cell->tableSrc, cell->row, cell->col);
+        if (openCellEditor(app, cell->tableSrc, cell->row, cell->col)) placeCellCaret(app,docX,docY);
         InvalidateRect(hwnd, nullptr, FALSE);
         return true;
     }
@@ -415,8 +533,37 @@ bool tableEditMouseDown(App& app, HWND hwnd, float docX, float docY) {
 
 bool tableEditKeyDown(App& app, HWND hwnd, WPARAM key) {
     if (!app.tableEditActive) return false;
-    // Ctrl chords pass through (save commits the open cell first)
-    if (GetKeyState(VK_CONTROL) & 0x8000) return false;
+    if (!shortcutModifiersAllowed(static_cast<unsigned>(key))) return false;
+    bool ctrl=(GetKeyState(VK_CONTROL)&0x8000)!=0;
+    bool shift=(GetKeyState(VK_SHIFT)&0x8000)!=0;
+    if (ctrl) {
+        size_t start=std::min(app.tableEditCaret,app.tableEditAnchor), end=std::max(app.tableEditCaret,app.tableEditAnchor);
+        if (key=='A') { app.tableEditAnchor=0; app.tableEditCaret=app.tableEditText.size(); }
+        else if (key=='C' || key=='X') {
+            if (start!=end) {
+                bool copied=false;
+                for(int attempt=0;attempt<10 && !(copied=copyToClipboard(hwnd,app.tableEditText.substr(start,end-start)));++attempt) Sleep(5);
+                if (copied && key=='X') insertCell(app,L"");
+            }
+        } else if (key=='V') {
+            // Cell paste is always plain text, never an entire new table.
+            auto pasted=clipboardLine(hwnd);
+            if (!pasted.empty()) insertCell(app,pasted);
+        } else if (key=='Z' || key=='Y') {
+            auto& from=key=='Z' ? app.tableEditUndo : app.tableEditRedo;
+            auto& to=key=='Z' ? app.tableEditRedo : app.tableEditUndo;
+            if (!from.empty()) {
+                to.push_back({app.tableEditText,app.tableEditCaret,app.tableEditAnchor});
+                auto saved=std::move(from.back()); from.pop_back();
+                app.tableEditText=std::move(saved.text); app.tableEditCaret=saved.caret; app.tableEditAnchor=saved.anchor;
+            }
+        } else if (key!=VK_LEFT && key!=VK_RIGHT && key!=VK_HOME && key!=VK_END && key!=VK_BACK && key!=VK_DELETE) {
+            return false; // save, search and other application commands
+        } else goto navigation;
+        cellChanged(app);
+        return true;
+    }
+navigation:
     switch (key) {
         case VK_ESCAPE:
             tableEditCancel(app);
@@ -427,7 +574,7 @@ bool tableEditKeyDown(App& app, HWND hwnd, WPARAM key) {
             InvalidateRect(hwnd, nullptr, FALSE);
             return true;
         case VK_TAB: {
-            bool back = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+            bool back = shift;
             size_t tableSrc = app.tableEditSrc;
             int row = app.tableEditRow, col = app.tableEditCol;
             tableEditCommit(app);
@@ -456,48 +603,44 @@ bool tableEditKeyDown(App& app, HWND hwnd, WPARAM key) {
             return true;
         }
         case VK_BACK:
-            if (app.tableEditCaret > 0) {
-                app.tableEditText.erase(--app.tableEditCaret, 1);
-                resetCursorBlink(app);
-                InvalidateRect(hwnd, nullptr, FALSE);
-            }
-            return true;
         case VK_DELETE:
-            if (app.tableEditCaret < app.tableEditText.size()) {
-                app.tableEditText.erase(app.tableEditCaret, 1);
-                InvalidateRect(hwnd, nullptr, FALSE);
-            }
-            return true;
+            if (app.tableEditCaret==app.tableEditAnchor) app.tableEditAnchor=ctrl ? wordCell(app,app.tableEditCaret,key==VK_DELETE) : stepCell(app,app.tableEditCaret,key==VK_DELETE);
+            insertCell(app,L"");
+            break;
         case VK_LEFT:
-            if (app.tableEditCaret > 0) app.tableEditCaret--;
-            resetCursorBlink(app);
-            InvalidateRect(hwnd, nullptr, FALSE);
-            return true;
         case VK_RIGHT:
-            if (app.tableEditCaret < app.tableEditText.size())
-                app.tableEditCaret++;
-            resetCursorBlink(app);
-            InvalidateRect(hwnd, nullptr, FALSE);
-            return true;
+            if (!shift && app.tableEditCaret!=app.tableEditAnchor) app.tableEditCaret=key==VK_RIGHT ? std::max(app.tableEditCaret,app.tableEditAnchor) : std::min(app.tableEditCaret,app.tableEditAnchor);
+            else app.tableEditCaret=ctrl ? wordCell(app,app.tableEditCaret,key==VK_RIGHT) : stepCell(app,app.tableEditCaret,key==VK_RIGHT);
+            if (!shift) app.tableEditAnchor=app.tableEditCaret;
+            break;
         case VK_HOME:
-            app.tableEditCaret = 0;
-            InvalidateRect(hwnd, nullptr, FALSE);
-            return true;
         case VK_END:
-            app.tableEditCaret = app.tableEditText.size();
-            InvalidateRect(hwnd, nullptr, FALSE);
-            return true;
+        case VK_UP:
+        case VK_DOWN: {
+            auto layout=cellLayout(app);
+            float x=0,y=0; auto hit=caretMetrics(app,layout.text.Get(),x,y);
+            if (ctrl && (key==VK_HOME || key==VK_END)) app.tableEditCaret=key==VK_HOME ? 0 : app.tableEditText.size();
+            else {
+                if (key==VK_HOME) x=-1;
+                if (key==VK_END) x=layout.box.right-layout.box.left+1;
+                y+=hit.height*(key==VK_UP ? -0.5f : key==VK_DOWN ? 1.5f : 0.5f);
+                app.tableEditCaret=hitCell(app,layout,layout.box.left+x,layout.box.top+y-app.tableEditScrollY);
+            }
+            if (!shift) app.tableEditAnchor=app.tableEditCaret;
+            break;
+        }
         default:
             return true;  // the open cell owns the keyboard
     }
+    cellChanged(app);
+    return true;
 }
 
 bool tableEditChar(App& app, wchar_t ch) {
     if (!app.tableEditActive) return false;
     if (ch < 0x20 || ch == 127) return true;  // controls handled as keys
-    app.tableEditText.insert(app.tableEditCaret++, 1, ch);
-    resetCursorBlink(app);
-    if (app.hwnd) InvalidateRect(app.hwnd, nullptr, FALSE);
+    insertCell(app,std::wstring(1,ch));
+    cellChanged(app);
     return true;
 }
 
@@ -511,17 +654,32 @@ void tableEditCancel(App& app) {
 
 bool tableEditCaretPoint(App& app, D2D1_POINT_2F& point) {
     if (!app.tableEditActive || !app.textFormat) return false;
-    const auto* cell = activeCellRect(app);
-    if (!cell) return false;
-    float pad = 8.0f * app.contentScale * app.zoomFactor;
-    float width = measureText(app, app.tableEditText.substr(0, app.tableEditCaret), app.textFormat);
-    point.x = documentViewportX(app) - app.scrollX +
-        std::min(cell->rect.right-pad, cell->rect.left+pad+width);
-    point.y = cell->rect.top-app.scrollY+pad+app.textFormat->GetFontSize()*1.4f;
+    auto layout=cellLayout(app);
+    if (!layout.text) return false;
+    followCaret(app,layout);
+    float x=0,y=0; auto hit=caretMetrics(app,layout.text.Get(),x,y);
+    point.x=documentViewportX(app)-app.scrollX+layout.box.left+x;
+    point.y=layout.box.top-app.scrollY+y-app.tableEditScrollY+hit.height;
     return true;
 }
 
+bool tableEditMouseMove(App& app, float screenX, float screenY) {
+    if (!app.tableEditSelecting) return false;
+    if (GetCapture()!=app.hwnd) { app.tableEditSelecting=false; return false; }
+    auto layout=cellLayout(app);
+    app.tableEditCaret=hitCell(app,layout,screenX-documentViewportX(app)+app.scrollX,screenY+app.scrollY);
+    cellChanged(app);
+    return true;
+}
+void tableEditMouseUp(App& app) {
+    if (!app.tableEditSelecting) return;
+    app.tableEditSelecting=false;
+    app.swallowNextMouseUp=false;
+    if (GetCapture()==app.hwnd) ReleaseCapture();
+}
+
 void renderTableEditOverlay(App& app) {
+    if (app.editorReadingPreview) return;
     if (!app.editMode || !editorPreviewVisible(app)) return;
     if (!app.renderTarget || !app.brush || !app.textFormat) return;
 
@@ -596,7 +754,6 @@ void renderTableEditOverlay(App& app) {
     if (!cell) return;  // relayout mid-frame; the next paint finds it
 
     D2D1_RECT_F r = toScreen(cell->rect);
-    float pad = 8.0f * scale;
     D2D1_COLOR_F fill = app.theme.background;
     fill.a = 1.0f;
     app.brush->SetColor(fill);
@@ -608,23 +765,31 @@ void renderTableEditOverlay(App& app) {
 
     D2D1_COLOR_F ink = app.theme.text;
     app.brush->SetColor(ink);
-    app.renderTarget->DrawText(
-        app.tableEditText.c_str(), (UINT32)app.tableEditText.size(),
-        app.textFormat,
-        D2D1::RectF(r.left + pad, r.top + pad, r.right - pad, r.bottom),
-        app.brush);
-
-    if (app.cursorBlinkOn) {
-        std::wstring beforeCaret =
-            app.tableEditText.substr(0, app.tableEditCaret);
-        float cw = beforeCaret.empty()
-                       ? 0.0f
-                       : measureText(app, beforeCaret, app.textFormat);
-        float cx = r.left + pad + cw + 1.0f;
-        app.renderTarget->DrawLine(
-            D2D1::Point2F(cx, r.top + pad),
-            D2D1::Point2F(cx, r.top + pad + app.textFormat->GetFontSize() *
-                                                1.4f),
-            app.brush, 1.2f);
+    auto layout=cellLayout(app);
+    if (!layout.text) return;
+    followCaret(app,layout);
+    const auto box=toScreen(layout.box);
+    auto origin=D2D1::Point2F(box.left,box.top-app.tableEditScrollY);
+    app.renderTarget->PushAxisAlignedClip({box.left,box.top,box.right+2,box.bottom},D2D1_ANTIALIAS_MODE_ALIASED);
+    size_t start=std::min(app.tableEditCaret,app.tableEditAnchor), end=std::max(app.tableEditCaret,app.tableEditAnchor);
+    if (start!=end) {
+        UINT32 count=0;
+        layout.text->HitTestTextRange(static_cast<UINT32>(start),static_cast<UINT32>(end-start),origin.x,origin.y,nullptr,0,&count);
+        std::vector<DWRITE_HIT_TEST_METRICS> rects(count);
+        if (count && SUCCEEDED(layout.text->HitTestTextRange(static_cast<UINT32>(start),static_cast<UINT32>(end-start),origin.x,origin.y,rects.data(),count,&count))) {
+            auto selected=app.theme.accent; selected.a=0.3f; app.brush->SetColor(selected);
+            for(const auto& hit:rects) app.renderTarget->FillRectangle({hit.left,hit.top,hit.left+hit.width,hit.top+hit.height},app.brush);
+        }
     }
+    app.brush->SetColor(ink);
+    app.renderTarget->DrawTextLayout(origin,layout.text.Get(),app.brush);
+    if (app.cursorBlinkOn && start==end) {
+        float x=0,y=0; auto hit=caretMetrics(app,layout.text.Get(),x,y);
+        float cx=origin.x+x+1;
+        app.brush->SetColor(app.theme.accent);
+        app.renderTarget->DrawLine(
+            D2D1::Point2F(cx,origin.y+y), D2D1::Point2F(cx,origin.y+y+hit.height),
+            app.brush,std::max(1.5f,dpi(app,1.5f)));
+    }
+    app.renderTarget->PopAxisAlignedClip();
 }

@@ -53,6 +53,9 @@ std::wstring keyLabel(KeyBinding binding);
 void resolveKeymap(KeyBinding (&keys)[KEY_ACTION_COUNT], const std::string& profile,
                    const std::vector<std::pair<std::string, std::string>>& overrides);
 bool keyBindingMatches(KeyBinding binding, unsigned key, bool isChar);
+// Alt/AltGr belongs to the keyboard layout. Shift is accepted only for
+// explicitly supported Ctrl commands and selection/navigation chords.
+bool shortcutModifiersAllowed(unsigned key);
 // Convert to the legacy viewer command codes. Unbound characters produce
 // no command; navigation virtual keys pass through unless explicitly moved.
 unsigned translateActionKey(const KeyBinding* keys, unsigned key, bool isChar);

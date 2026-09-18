@@ -12,6 +12,8 @@
 // Mouse press in the preview pane (document coords already resolved by
 // the caller). Returns true when the press was consumed.
 bool tableEditMouseDown(App& app, HWND hwnd, float docX, float docY);
+bool tableEditMouseMove(App& app, float screenX, float screenY);
+void tableEditMouseUp(App& app);
 // Keyboard while a cell editor is open; true = consumed
 bool tableEditKeyDown(App& app, HWND hwnd, WPARAM key);
 // Printable character while a cell editor is open; true = consumed

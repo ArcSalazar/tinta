@@ -883,6 +883,11 @@ struct App {
     int tableEditRow = -1, tableEditCol = -1;
     std::wstring tableEditText;
     size_t tableEditCaret = 0;
+    size_t tableEditAnchor = 0;
+    bool tableEditSelecting = false;
+    float tableEditScrollY = 0;
+    struct TableEditSnapshot { std::wstring text; size_t caret = 0, anchor = 0; };
+    std::vector<TableEditSnapshot> tableEditUndo, tableEditRedo;
     // Hover affordances: + row under the table, + column at its right edge
     size_t tableAddSrc = 0;              // table the buttons belong to
     D2D1_RECT_F tableAddRowRect{};       // document coordinates
@@ -1145,6 +1150,8 @@ struct App {
     // Edit mode
     bool editMode = false;
     float editorSplitRatio = 0.5f;
+    // Full-width reading of the live buffer; editMode still owns its data.
+    bool editorReadingPreview = false;
     bool draggingSeparator = false;
     float separatorDragStartX = 0;
     float separatorDragStartRatio = 0;
@@ -1403,6 +1410,7 @@ inline float editSeamWidth(const App& app) {
 }
 
 inline float editorPaneWidth(const App& app) {
+    if (app.editorReadingPreview) return 0;
     return app.editorShowPreview
         ? app.width * app.editorSplitRatio - editSeamWidth(app) * 0.5f
         : static_cast<float>(app.width);
@@ -1411,7 +1419,7 @@ inline float editorPaneWidth(const App& app) {
 // Left tool rail (design t8/t11): slides in with edit mode, carries the
 // formatting controls
 inline float editRailWidth(const App& app) {
-    if (!app.editMode) return 0.0f;
+    if (!app.editMode || app.editorReadingPreview) return 0.0f;
     return dpi(app, 48.0f) * app.editRailAnim;
 }
 
@@ -1468,6 +1476,7 @@ inline float folderBrowserPanelWidth(const App& app) { return sidePanelWidths(ap
 inline float tocPanelWidth(const App& app) { return sidePanelWidths(app).toc; }
 
 inline float documentViewportX(const App& app) {
+    if (app.editMode && app.editorReadingPreview) return 0;
     if (!app.editMode) {
         // Side panels push the content aside instead of covering it; the
         // shift follows the panel's slide-in animation. A right-docked TOC
@@ -1491,7 +1500,7 @@ inline float documentViewportX(const App& app) {
 }
 
 inline bool editorPreviewVisible(const App& app) {
-    return app.editMode && app.editorShowPreview;
+    return app.editMode && (app.editorShowPreview || app.editorReadingPreview);
 }
 
 // Floating render sheet (design 10a): the page lies on the editor's

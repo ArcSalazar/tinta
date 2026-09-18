@@ -429,7 +429,7 @@ static void pushUndo(App& app, App::EditAction::Type type, size_t pos,
 }
 
 // Undo-capable range replace for out-of-pane editors (the table cell
-// editor, #148): the whole swap lands on the undo stack as one pair
+// editor, #148): one committed cell is one atomic undo action.
 void editorReplaceRangeExternal(App& app, size_t start, size_t end,
                                 const std::wstring& repl) {
     if (start > app.editorText.size()) start = app.editorText.size();
@@ -437,16 +437,10 @@ void editorReplaceRangeExternal(App& app, size_t start, size_t end,
     if (end < start) end = start;
     std::wstring removed = app.editorText.substr(start, end - start);
     if (removed == repl) return;  // no-op edits stay off the undo stack
-    if (!removed.empty()) {
-        app.editorText.erase(start, end - start);
-        pushUndo(app, App::EditAction::Delete, start, removed,
-                 app.editorCursorPos, start);
-    }
-    if (!repl.empty()) {
-        app.editorText.insert(start, repl);
-        pushUndo(app, App::EditAction::Insert, start, repl, start,
-                 start + repl.size());
-    }
+    app.undoStack.push_back({App::EditAction::Replace,start,removed,
+                            app.editorCursorPos,start+repl.size(),repl});
+    app.redoStack.clear();
+    app.editorText.replace(start,end-start,repl);
     app.editorCursorPos = start + repl.size();
     app.editorHasSelection = false;
     app.editorDesiredCol = -1;
@@ -849,7 +843,7 @@ void editorReparse(App& app, bool force) {
         auto metadata = fm::parse(utf8);
         if (metadata.present) observeFrontmatter(app, metadata.properties);
     }
-    if (!app.editorShowPreview && !force) return;
+    if (!editorPreviewVisible(app) && !force) return;
 
     // Build line-to-byte-offset mapping for scroll sync
     app.editorLineByteOffsets.clear();
@@ -872,6 +866,7 @@ void editorReparse(App& app, bool force) {
 // --- Mode transitions ---
 
 static void enterEditModeWithContent(App& app, const std::string& content) {
+    app.editorReadingPreview = false;
     // The unified editor owns the whole layout: side panels close on
     // entry, pinned or not (#156) - the pin survives for the next open
     app.showToc = false;
@@ -1006,6 +1001,7 @@ void restoreEditBuffer(App& app, const std::wstring& text, bool dirty,
 }
 
 void enterEditMode(App& app) {
+    if (app.editMode) { setEditorReadingPreview(app, false); return; }
     if (app.currentFile.empty()) {
         if (app.startPageEmbeddedOpen) {
             // Learn documents have no backing file. Edit an untitled copy;
@@ -1074,6 +1070,7 @@ void exitEditMode(App& app) {
     }
 
     app.editMode = false;
+    app.editorReadingPreview = false;
     app.clearEditorLineLayoutCache();
     app.editorText.clear();
     app.editorLineStarts.clear();
@@ -1122,6 +1119,39 @@ void exitEditMode(App& app) {
     app.focusMermaidOnNextLayout = isMermaidDocumentPath(app.currentFile);
     app.layoutDirty = true;
     InvalidateRect(app.hwnd, nullptr, FALSE);
+}
+
+void setEditorReadingPreview(App& app, bool reading) {
+    if (!app.editMode || reading == app.editorReadingPreview) return;
+    tableEditCommit(app);
+    closeEditCtxMenu(app);
+    if (app.showSearch) closeSearchInput(app);
+    app.editorReadingPreview = reading;
+    app.editorSelecting = app.selecting = app.hasSelection = false;
+    app.escPressedOnce = false;
+    editorReparse(app, true);
+    app.layoutDirty = true;
+    updateBlinkTimer(app);
+    InvalidateRect(app.hwnd, nullptr, FALSE);
+}
+
+D2D1_RECT_F editorReadingButtonRect(const App& app) {
+    return {dpi(app, 56), static_cast<float>(app.height)-dpi(app, 42),
+            dpi(app, 188), static_cast<float>(app.height)-dpi(app, 12)};
+}
+void renderEditorReadingButton(App& app) {
+    if (!app.editMode || !app.brush || !app.codeFormat) return;
+    auto r=editorReadingButtonRect(app);
+    app.brush->SetColor(app.theme.codeBackground);
+    app.renderTarget->FillRoundedRectangle(D2D1::RoundedRect(r,dpi(app,5),dpi(app,5)),app.brush);
+    app.brush->SetColor(app.theme.accent);
+    auto label=tr(app,app.editorReadingPreview ? "editor.resume" : "editor.read");
+    Microsoft::WRL::ComPtr<IDWriteTextLayout> layout;
+    if (SUCCEEDED(app.dwriteFactory->CreateTextLayout(label,static_cast<UINT32>(wcslen(label)),app.codeFormat,r.right-r.left,r.bottom-r.top,layout.GetAddressOf()))) {
+        layout->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+        layout->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        app.renderTarget->DrawTextLayout({r.left,r.top},layout.Get(),app.brush);
+    }
 }
 
 // --- File save ---
@@ -1525,6 +1555,7 @@ void confirmExitAction(App& app, HWND hwnd, int action) {
 }
 
 void handleEditorKeyDown(App& app, HWND hwnd, WPARAM wParam) {
+    if (!shortcutModifiersAllowed(static_cast<unsigned>(wParam))) return;
     bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
     bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
 
@@ -1574,33 +1605,34 @@ void handleEditorKeyDown(App& app, HWND hwnd, WPARAM wParam) {
     }
 
     if (wParam == VK_ESCAPE) {
-        // Dirty buffer: straight to the dialog — it is the guard, and a
-        // second Esc stage on top of it is what made the old flow a maze.
-        // Clean buffer: keep the documented double-Esc exit.
-        if (app.editorDirty) {
-            exitEditMode(app);
-            app.escPressedOnce = false;
-            return;
-        }
-        auto now = std::chrono::steady_clock::now();
-        if (app.escPressedOnce) {
-            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                now - app.lastEscTime).count();
-            if (elapsed < 500) {
-                exitEditMode(app);
-                app.escPressedOnce = false;
-                return;
-            }
-        }
-        app.escPressedOnce = true;
-        app.lastEscTime = now;
-
-        // Show brief hint
-        signalPushKey(app, SIG_INFO, SIGI_INFO, "toast.exit_confirm");
-        InvalidateRect(hwnd, nullptr, FALSE);
+        setEditorReadingPreview(app, !app.editorReadingPreview);
         return;
     }
     app.escPressedOnce = false;
+
+    if (app.editorReadingPreview) {
+        if ((!ctrl && keyBindingMatches(app.keymap[KA_EDIT], static_cast<unsigned>(wParam), false)) || (ctrl && wParam=='E')) {
+            setEditorReadingPreview(app,false);
+            return;
+        }
+        // Reading a live buffer never edits it at an invisible source caret.
+        if (ctrl && wParam=='A') {
+            ensureLayoutComplete(app);
+            app.selAnchor=0; app.selFocus=app.docText.size(); app.hasSelection=true;
+        } else if (!ctrl && (wParam==VK_UP || wParam==VK_DOWN || wParam==VK_PRIOR || wParam==VK_NEXT || wParam==VK_SPACE || wParam==VK_HOME || wParam==VK_END)) {
+            float step=dpi(app,40);
+            if (wParam==VK_PRIOR || wParam==VK_NEXT || wParam==VK_SPACE) step=app.height*0.85f;
+            if (wParam==VK_UP || wParam==VK_PRIOR || (wParam==VK_SPACE && shift)) step=-step;
+            float end=std::max(0.0f,app.contentHeight-app.height);
+            app.scrollY=app.targetScrollY=wParam==VK_HOME ? 0 : wParam==VK_END ? end : std::clamp(app.scrollY+step,0.0f,end);
+        } else if (ctrl && (wParam=='S' || wParam=='N' || wParam=='O' || wParam=='P')) {
+            // Existing save/open/print commands retain ownership of the buffer.
+        } else return;
+        if (!(ctrl && (wParam=='S' || wParam=='N' || wParam=='O' || wParam=='P'))) {
+            InvalidateRect(hwnd,nullptr,FALSE);
+            return;
+        }
+    }
 
     // These keys choose a new logical insertion position. Vertical movement
     // and modifier-only events retain the visual-row side of a prior hit.
@@ -1729,8 +1761,9 @@ void handleEditorKeyDown(App& app, HWND hwnd, WPARAM wParam) {
                 openPrintPreview(app, hwnd);
                 return;
             case 'E': {
+                if (shift) { setEditorReadingPreview(app,true); return; }
                 // Ctrl+E shows / hides the live render beside the source
-                // (design t11; Ctrl+Shift+E kept as the old alias)
+                // Ctrl+Shift+E opens the full-width unsaved reading view.
                 app.editorShowPreview = !app.editorShowPreview;
                 app.clearEditorLineLayoutCache();
                 if (app.editorShowPreview) {
@@ -2317,6 +2350,7 @@ void editRailInvoke(App& app, HWND hwnd, int id) {
 }
 
 void handleEditorCharInput(App& app, HWND hwnd, WPARAM wParam) {
+    if (app.editorReadingPreview) return;
     // Swallow characters while confirm-exit prompt is active
     if (app.confirmExitPending) return;
 
