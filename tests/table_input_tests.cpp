@@ -157,7 +157,9 @@ int runTableInputTests() {
     if(!app.hwnd || !initD2D(app) || !createRenderTarget(app))return 2;
     app.width=1050;app.height=900;updateTextFormats(app);Settings settings;settings.keyProfile="windows";applyKeymap(app,settings);
     auto fixture=std::filesystem::path(TINTA_FIND_FIXTURE).parent_path()/L"table-input-236.md";
-    std::ifstream input(fixture,std::ios::binary);std::string bytes((std::istreambuf_iterator<char>(input)),{});
+    // The editor normalizes CRLF. Read the expected fixture in text mode too,
+    // so fresh Windows checkouts behave like LF checkouts in these comparisons.
+    std::ifstream input(fixture);std::string bytes((std::istreambuf_iterator<char>(input)),{});
     auto source=toWide(bytes);check(!source.empty(),"fixture loads");app.currentFile=toUtf8(fixture.wstring());tabsInit(app);
     modifiers(app);cells(app,source);reading(app,source);
     DestroyWindow(app.hwnd);app.hwnd=nullptr;state.reset();CoUninitialize();OleUninitialize();
