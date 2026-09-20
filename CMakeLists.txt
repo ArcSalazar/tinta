@@ -86,6 +86,7 @@ set(SOURCES
     src/startpage.cpp
     src/editrail.cpp
     src/pandoc.cpp
+    src/plantuml.cpp
 )
 
 set(HEADERS
@@ -112,6 +113,7 @@ set(HEADERS
     include/i18n.h
     include/selection.h
     include/math_render.h
+    include/plantuml.h
 )
 
 # Windows resource file (icon)
@@ -312,6 +314,19 @@ if(BUILD_TESTING)
 
     # PlantUML CLI test double (used by the plantuml suites; no Java needed).
     add_executable(fake_plantuml tests/fake_plantuml.cpp)
+
+    # PlantUML core module unit suite: language gate, tool model, preamble
+    # injection, cache key, command line and sync render, all driven against
+    # the fake CLI double (no Java needed).
+    add_executable(plantuml_tests tests/plantuml_tests.cpp src/plantuml.cpp)
+    target_include_directories(plantuml_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    add_dependencies(plantuml_tests fake_plantuml)
+    target_compile_definitions(plantuml_tests PRIVATE
+        TINTA_FAKE_PLANTUML="$<TARGET_FILE:fake_plantuml>"
+        TINTA_PLANTUML_SOURCE="${CMAKE_CURRENT_SOURCE_DIR}/src/plantuml.cpp")
+    add_test(NAME plantuml_parser COMMAND plantuml_tests)
+    add_test(NAME plantuml_parser_selfcheck COMMAND plantuml_tests --expect-failure)
+    set_tests_properties(plantuml_parser_selfcheck PROPERTIES WILL_FAIL TRUE)
 
     add_executable(document_tests
         tests/document_tests.cpp
