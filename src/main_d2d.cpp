@@ -1533,6 +1533,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             break;
 
         case WM_CAPTURECHANGED:
+            if (app && (HWND)lParam != hwnd) cancelAppMenuPress(*app, hwnd);
             if (app && (HWND)lParam != hwnd) tableEditMouseUp(*app);
             if (app && (HWND)lParam != hwnd) searchInputMouseUp(*app);
             if (app && (HWND)lParam != hwnd && app->frontmatterDrag >= 0) {
@@ -1549,6 +1550,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
 
         case WM_CANCELMODE:
+            if (app) cancelAppMenuPress(*app, hwnd);
             if (app) tableEditMouseUp(*app);
             if (app) searchInputMouseUp(*app);
             if (app && app->frontmatterDrag >= 0) {

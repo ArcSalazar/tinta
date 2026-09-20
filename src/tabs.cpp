@@ -368,6 +368,8 @@ struct StripMetrics {
     bool compressed = false;  // chevron shown
     float plusX = 0.0f;
     float chevronX = 0.0f;
+    int firstVisible = 0;
+    int visibleCount = 0;
 };
 
 StripMetrics stripMetrics(const App& app) {
@@ -376,29 +378,31 @@ StripMetrics stripMetrics(const App& app) {
     // Tabs clear the edit-mode tool rail instead of hiding under it
     m.tabsLeft = std::max(dpi(app, 40.0f),
                           editRailWidth(app) + dpi(app, 8.0f));
-    float buttons = captionButtonWidth(app) * 3.0f + pinButtonWidth(app);
     float plusW = dpi(app, 30.0f);
     float chevronW = dpi(app, 32.0f);
     float gap = dpi(app, 2.0f);
-    size_t count = std::max<size_t>(app.tabs.size(), 1);
+    int count = std::max((int)app.tabs.size(), 1);
 
     // With the floating sheet the tab row lives above the source column
     // only; the caption buttons float on the sheet as their own island
-    float rowRight = editorPreviewVisible(app)
-                         ? editorPaneWidth(app)
-                         : (float)app.width - buttons;
-    float available = rowRight - m.tabsLeft - plusW - dpi(app, 16.0f);
+    float rowRight = titleDragRect(app).left;
+    float available = std::max(0.0f, rowRight - m.tabsLeft - plusW - dpi(app, 4.0f));
     float natural = dpi(app, 190.0f);
     float minimum = dpi(app, 60.0f);
     float per = (available - gap * (count - 1)) / (float)count;
-    m.tabWidth = std::max(minimum, std::min(natural, per));
-    m.compressed = per < dpi(app, 150.0f);
+    m.compressed = count > 1 && per < dpi(app, 150.0f);
     if (m.compressed) {
-        available -= chevronW + gap;
-        per = (available - gap * (count - 1)) / (float)count;
-        m.tabWidth = std::max(minimum, std::min(natural, per));
+        available = std::max(0.0f, available - chevronW - gap);
     }
-    m.tabsRight = m.tabsLeft + (m.tabWidth + gap) * count - gap;
+    // Overflow uses the existing switcher rather than covering the drag
+    // region or caption buttons. Keep the active tab in the visible range.
+    m.visibleCount = std::min(count, std::max(1, (int)((available + gap) / (minimum + gap))));
+    m.tabWidth = std::min(natural, (available - gap * (m.visibleCount - 1)) / m.visibleCount);
+    m.firstVisible = std::clamp(app.tabFirstVisible, 0, count - m.visibleCount);
+    const int active = std::clamp(app.activeTab, 0, count - 1);
+    if (active < m.firstVisible) m.firstVisible = active;
+    if (active >= m.firstVisible + m.visibleCount) m.firstVisible = active - m.visibleCount + 1;
+    m.tabsRight = m.tabsLeft + (m.tabWidth + gap) * m.visibleCount - gap;
     m.plusX = m.tabsRight + dpi(app, 4.0f);
     m.chevronX = m.plusX + plusW + gap;
     return m;
@@ -415,10 +419,10 @@ int tabDropInsertionIndex(const App& app, POINT clientPoint) {
         return count;
     }
     const float step = m.tabWidth + dpi(app, 2.0f);
-    for (int i = 0; i < count; ++i) {
-        if (clientPoint.x < m.tabsLeft + step * i + m.tabWidth / 2) return i;
+    for (int i = 0; i < m.visibleCount; ++i) {
+        if (clientPoint.x < m.tabsLeft + step * i + m.tabWidth / 2) return m.firstVisible + i;
     }
-    return count;
+    return m.firstVisible + m.visibleCount;
 }
 
 bool tabReceiveCopyData(App& app, HWND hwnd, const COPYDATASTRUCT& data) {
@@ -466,6 +470,17 @@ D2D1_RECT_F captionButtonRect(const App& app, int button) {
 float captionIslandLeft(const App& app) {
     return (float)app.width - captionButtonWidth(app) * 3.0f -
            pinButtonWidth(app) - dpi(app, 8.0f);
+}
+
+D2D1_RECT_F titleDragRect(const App& app) {
+    float right = pinButtonRect(app).left;
+    if (editorPreviewVisible(app)) right = std::min(right, editorPaneWidth(app));
+    right = std::max(appMenuButtonRect(app).right, right);
+    // A very narrow split pane still needs a title/tab context target and
+    // room for its controls. Reduce the gap only after that space runs out.
+    const float controlsLeft = std::max(dpi(app, 40.0f), editRailWidth(app) + dpi(app, 8.0f));
+    const float gap = std::clamp(right - controlsLeft - dpi(app, 84.0f), 0.0f, dpi(app, 32.0f));
+    return D2D1::RectF(right - gap, 0.0f, right, chromeTopHeight(app));
 }
 
 int captionHitTest(const App& app, float x, float y) {
@@ -624,22 +639,19 @@ void renderTabStrip(App& app) {
         float textLeft = std::max(iconCell + dpi(app, 4.0f),
                                   editRailWidth(app) + dpi(app, 8.0f));
         float textRight = textLeft;
-        float maxRight = sheetMode
-                             ? editorPaneWidth(app) - dpi(app, 8.0f)
-                             : (float)app.width -
-                                   captionButtonWidth(app) * 3 -
-                                   pinButtonWidth(app);
+        float maxRight = titleDragRect(app).left;
+        float labelRight = std::max(textLeft, maxRight - dpi(app, 74.0f));
         if (app.folderBrowserFormat) {
             app.brush->SetColor(muted);
             app.renderTarget->DrawText(
                 title.c_str(), (UINT32)title.size(), app.folderBrowserFormat,
                 D2D1::RectF(textLeft, (stripH - dpi(app, 17.0f)) * 0.5f,
-                            maxRight, stripH),
+                            labelRight, stripH),
                 app.brush);
             IDWriteTextLayout* layout = nullptr;
             app.dwriteFactory->CreateTextLayout(
                 title.c_str(), (UINT32)title.size(), app.folderBrowserFormat,
-                std::max(1.0f, maxRight - textLeft), stripH, &layout);
+                std::max(1.0f, labelRight - textLeft), stripH, &layout);
             if (layout) {
                 DWRITE_TEXT_METRICS tm{};
                 layout->GetMetrics(&tm);
@@ -685,20 +697,21 @@ void renderTabStrip(App& app) {
         drawPlusButton(app, plusX, stripH, faint, muted);
     } else {
         StripMetrics m = stripMetrics(app);
+        app.tabFirstVisible = m.firstVisible;
         float radius = dpi(app, 8.0f);
         float gap = dpi(app, 2.0f);
 
         app.renderTarget->PushAxisAlignedClip(
-            D2D1::RectF(0, 0, stripRight, stripH),
+            D2D1::RectF(m.tabsLeft, 0, m.tabsRight, stripH),
             D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
 
-        for (size_t i = 0; i < app.tabs.size(); i++) {
+        for (int i = m.firstVisible; i < m.firstVisible + m.visibleCount; i++) {
             // Pulled clear of the strip: the slot stays as a gap while
             // the tab rides along as the ghost card
             if (app.tabDragDetached && (int)i == app.tabDragIndex) continue;
             bool active = (int)i == app.activeTab;
             bool hovered = (int)i == app.hoveredTab;
-            float x = m.tabsLeft + (m.tabWidth + gap) * i;
+            float x = m.tabsLeft + (m.tabWidth + gap) * (i - m.firstVisible);
             if (app.tabDragging && (int)i == app.tabDragIndex) {
                 // The dragged tab follows the pointer within the row
                 float follow = (float)app.mouseX - app.tabDragOffsetX;
@@ -733,7 +746,7 @@ void renderTabStrip(App& app) {
                                 : (app.tabs[i].editMode &&
                                    app.tabs[i].editorDirty);
             bool missing = app.tabs[i].fileMissing && !app.tabs[i].path.empty();
-            bool showClose = active || hovered;
+            bool showClose = (active || hovered) && m.tabWidth >= dpi(app, 48.0f);
             // Status dot: orange = unsaved changes, red-grey = the file
             // vanished from disk
             bool showDot = dirty || missing;
@@ -743,7 +756,7 @@ void renderTabStrip(App& app) {
 
             // Label, ellipsis-trimmed, leaving room for the close/dot
             float labelRight = r.right - dpi(app, showClose ? 30.0f : 20.0f);
-            if (app.folderBrowserFormat) {
+            if (app.folderBrowserFormat && labelRight > r.left + dpi(app, 12.0f)) {
                 app.brush->SetColor(active ? text : muted);
                 app.renderTarget->DrawText(
                     app.tabs[i].title.c_str(), (UINT32)app.tabs[i].title.size(),
@@ -1649,8 +1662,8 @@ void tabDragMove(App& app, HWND hwnd, int x, int y) {
     // Reorder: the dragged tab claims the slot under the pointer
     StripMetrics m = stripMetrics(app);
     float gap = dpi(app, 2.0f);
-    int slot = (int)(((float)x - m.tabsLeft) / (m.tabWidth + gap));
-    slot = std::max(0, std::min((int)app.tabs.size() - 1, slot));
+    int slot = m.firstVisible + (int)(((float)x - m.tabsLeft) / (m.tabWidth + gap));
+    slot = std::clamp(slot, m.firstVisible, m.firstVisible + m.visibleCount - 1);
     if (slot != app.tabDragIndex) {
         App::DocTab moved = std::move(app.tabs[app.tabDragIndex]);
         app.tabs.erase(app.tabs.begin() + app.tabDragIndex);

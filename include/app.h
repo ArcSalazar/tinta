@@ -521,6 +521,7 @@ struct App {
     // starts reordering, leaving the strip vertically detaches the tab
     // into its own window
     int tabDragIndex = -1;       // pressed/dragged tab slot
+    int tabFirstVisible = 0;    // retained overflow viewport; active tab stays visible
     bool tabDragging = false;    // threshold crossed
     float tabDragOffsetX = 0.0f; // grab point within the tab
     int tabDragStartX = 0;
@@ -601,6 +602,8 @@ struct App {
     bool showContextMenu = false;
     bool applicationMenu = false;
     bool appMenuHover = false;
+    bool appMenuPressed = false; // click on release, native window drag on movement
+    POINT appMenuPressPoint{};
     bool contextMenuKeyboard = false;
     // The mouse-up of a menu-item click must not reach the overlay handlers:
     // an action that opens the TOC or theme chooser would otherwise be

@@ -990,7 +990,37 @@ void cancelDocumentScrollbarDrag(App& app, HWND hwnd) {
     endDocumentScrollbarDrag(app, hwnd, true);
 }
 
+void cancelAppMenuPress(App& app, HWND hwnd) {
+    if (!app.appMenuPressed) return;
+    app.appMenuPressed = false;
+    app.swallowNextMouseUp = true;
+    if (GetCapture() == hwnd) ReleaseCapture();
+    InvalidateRect(hwnd, nullptr, FALSE);
+}
+
 void handleMouseMove(App& app, HWND hwnd, LPARAM lParam) {
+    if (app.appMenuPressed) {
+        app.mouseX = GET_X_LPARAM(lParam);
+        app.mouseY = GET_Y_LPARAM(lParam);
+        if (!appMenuAvailable(app) || GetCapture() != hwnd) {
+            cancelAppMenuPress(app, hwnd);
+            return;
+        }
+        const UINT windowDpi = GetDpiForWindow(hwnd);
+        const int thresholdX = std::max(1, GetSystemMetricsForDpi(SM_CXDRAG, windowDpi));
+        const int thresholdY = std::max(1, GetSystemMetricsForDpi(SM_CYDRAG, windowDpi));
+        if (std::abs(app.mouseX - app.appMenuPressPoint.x) >= thresholdX ||
+            std::abs(app.mouseY - app.appMenuPressPoint.y) >= thresholdY) {
+            POINT screen = app.appMenuPressPoint;
+            ClientToScreen(hwnd, &screen);
+            // Clear the gesture before releasing capture; the native move
+            // loop then handles snapping, maximized restore and window drops.
+            cancelAppMenuPress(app, hwnd);
+            closeContextMenu(app);
+            SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, MAKELPARAM(screen.x, screen.y));
+        }
+        return;
+    }
     if (tableEditMouseMove(app, static_cast<float>(GET_X_LPARAM(lParam)),
                               static_cast<float>(GET_Y_LPARAM(lParam)))) return;
     if (searchInputMouseMove(app, static_cast<float>(GET_X_LPARAM(lParam)),
@@ -1792,8 +1822,13 @@ void handleMouseDown(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
         return;
     }
     if (appMenuButtonAt(app, (float)GET_X_LPARAM(lParam), (float)GET_Y_LPARAM(lParam))) {
-        toggleApplicationMenu(app, hwnd);
-        app.swallowNextMouseUp = true;
+        if (appMenuAvailable(app)) {
+            app.appMenuPressed = true;
+            app.appMenuPressPoint = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            SetCapture(hwnd);
+        } else {
+            app.swallowNextMouseUp = true;
+        }
         return;
     }
     // Context menu: a click lands on an item or dismisses the menu; either
@@ -2697,6 +2732,14 @@ static void toggleFitBlock(App& app, HWND hwnd, unsigned key) {
 }
 
 void handleMouseUp(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
+    if (app.appMenuPressed) {
+        const bool click = GetCapture() == hwnd && appMenuAvailable(app) &&
+            appMenuButtonAt(app, (float)GET_X_LPARAM(lParam), (float)GET_Y_LPARAM(lParam));
+        app.appMenuPressed = false;
+        if (GetCapture() == hwnd) ReleaseCapture();
+        if (click) toggleApplicationMenu(app, hwnd);
+        return; // never let the opening release activate the menu or document
+    }
     if (app.tableEditSelecting) { tableEditMouseUp(app); return; }
     if (app.searchSelectingField >= 0) { searchInputMouseUp(app); return; }
     if (app.scrollbarDragging || app.hScrollbarDragging) {
@@ -3389,6 +3432,10 @@ static void toggleZenMode(App& app, HWND hwnd) {
 
 bool handleKeyDown(App& app, HWND hwnd, WPARAM wParam) {
     if (!shortcutModifiersAllowed(static_cast<unsigned>(wParam))) return false;
+    if (app.appMenuPressed) {
+        if (wParam == VK_ESCAPE) cancelAppMenuPress(app, hwnd);
+        return true;
+    }
     if (app.panelResize.panel != SidePanel::None) {
         if (wParam == VK_ESCAPE) sidePanelResizeEnd(app, hwnd, true);
         return true;

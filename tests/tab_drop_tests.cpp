@@ -110,7 +110,9 @@ int runTabDropTests() {
                     app.editMode = edit;
                     app.editRailAnim = 1;
                     const auto hits = renderTabs(app);
-                    check(hits.size() == 3, "all three existing tabs render");
+                    check(!hits.empty() && hits.size() <= 3, "tabs render within the available strip width");
+                    check(std::any_of(hits.begin(), hits.end(), [&](const auto& hit) { return hit.index == app.activeTab; }),
+                          "active tab remains visible when the strip overflows");
                     for (const auto& hit : hits) {
                         const int middle = (int)((hit.rect.left + hit.rect.right) / 2);
                         if (middle + 2 >= captionIslandLeft(app) ||
