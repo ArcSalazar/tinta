@@ -310,6 +310,9 @@ if(BUILD_TESTING)
     )
     add_test(NAME mermaid_parser COMMAND mermaid_tests)
 
+    # PlantUML CLI test double (used by the plantuml suites; no Java needed).
+    add_executable(fake_plantuml tests/fake_plantuml.cpp)
+
     add_executable(document_tests
         tests/document_tests.cpp
         src/document.cpp src/frontmatter.cpp
