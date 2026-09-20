@@ -9,8 +9,15 @@
 //
 // Passing --expect-failure makes the harness fail on purpose; ctest runs
 // that mode as a separate WILL_FAIL test so the checker itself is proven.
+//
+// The suite must run through the portable driver
+// (tests/run_plantuml_tests.cmake), which stages this binary in a temp
+// folder beside its own settings.ini and passes --portable-test. The
+// settings round-trip writes that file; a direct run refuses instead, so
+// the user's %APPDATA%\Tinta is never touched.
 
 #include "plantuml.h"
+#include "settings.h"
 
 #include <algorithm>
 #include <chrono>
@@ -90,6 +97,35 @@ private:
     std::wstring previous_;
     bool had_ = false;
 };
+
+std::string readTextFile(const std::filesystem::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return {};
+    return std::string((std::istreambuf_iterator<char>(in)),
+                       std::istreambuf_iterator<char>());
+}
+
+// True only when CTest's portable driver staged this executable: the exe
+// sits in the temp TEST_DIR next to the driver's settings.ini, the working
+// directory is that folder, and --portable-test was passed. Anything else
+// (for example a direct run from build\Release) refuses so the settings
+// round-trip can never reach %APPDATA%\Tinta.
+bool inIsolatedPortableFolder() {
+    wchar_t exe[MAX_PATH]{};
+    if (GetModuleFileNameW(nullptr, exe, MAX_PATH) == 0) return false;
+    const std::filesystem::path dir = std::filesystem::path(exe).parent_path();
+    const std::string marker = readTextFile(dir / "settings.ini");
+    if (marker != "; Isolated plantuml test configuration\n" &&
+        marker != "; Isolated plantuml test configuration\r\n") {
+        return false;
+    }
+    std::error_code ec;
+    return std::filesystem::equivalent(dir, std::filesystem::current_path(),
+                                       ec) &&
+           !ec;
+}
+
+
 
 std::filesystem::path scratchRoot() {
     wchar_t base[MAX_PATH] = {};
@@ -492,6 +528,97 @@ void testResolveTool() {
           "SearchPathW picked the java.exe from PATH");
 }
 
+// ------------------------------------------------------- tool path search
+
+void testResolveToolWithPathSearch() {
+    // A non-empty path goes straight through resolveTool: an existing exe
+    // resolves exactly like the direct call, a missing path stays
+    // unavailable (an explicit choice never silently falls back to PATH).
+    const plantuml::Tool direct = plantuml::resolveTool(kFakeToolPath);
+    const plantuml::Tool explicitTool =
+        plantuml::resolveToolWithPathSearch(kFakeToolPath);
+    check(explicitTool.available, "an explicit exe path is available");
+    check(explicitTool.program == direct.program &&
+          explicitTool.jar == direct.jar &&
+          explicitTool.isJar == direct.isJar,
+          "an explicit path resolves exactly like resolveTool");
+    check(!plantuml::resolveToolWithPathSearch(
+               L"C:/definitely/missing/plantuml.exe")
+               .available,
+          "an explicit missing path stays unavailable");
+
+    // PATH branch 1: no plantuml.exe anywhere in the search path. Replacing
+    // PATH with an empty temp dir keeps the probe deterministic (the control
+    // below proves the rest of the search path carries none either).
+    const std::filesystem::path emptyDir = freshScratch(L"path-empty");
+    std::filesystem::create_directories(emptyDir);
+    {
+        const ScopedEnv pathEnv(L"PATH", emptyDir.c_str());
+        wchar_t probe[MAX_PATH]{};
+        check(SearchPathW(nullptr, L"plantuml.exe", nullptr, MAX_PATH, probe,
+                          nullptr) == 0,
+              "control: no plantuml.exe in the search path");
+        const plantuml::Tool none = plantuml::resolveToolWithPathSearch(L"");
+        check(!none.available,
+              "an empty path without plantuml.exe is unavailable");
+    }
+
+    // PATH branch 2: a temp dir holding a copy of the fake tool renamed
+    // plantuml.exe is found through PATH and resolves as an exe tool.
+    const std::filesystem::path shimDir = freshScratch(L"path-shim");
+    std::filesystem::create_directories(shimDir);
+    std::filesystem::copy_file(kFakeToolPath, shimDir / L"plantuml.exe",
+                               std::filesystem::copy_options::overwrite_existing);
+    {
+        const ScopedEnv pathEnv(L"PATH", shimDir.c_str());
+        const plantuml::Tool fromPath = plantuml::resolveToolWithPathSearch(L"");
+        check(fromPath.available, "plantuml.exe on PATH resolves");
+        check(!fromPath.isJar, "a PATH plantuml.exe is an exe tool");
+        check(fromPath.program == (shimDir / L"plantuml.exe").wstring(),
+              "the PATH plantuml.exe becomes the program");
+    }
+}
+
+// -------------------------------------------------------- settings round-trip
+
+void testSettingsRoundTrip() {
+    // main() guarantees this runs inside CTest's isolated portable folder,
+    // so saveSettings/loadSettings write the temp settings.ini staged by
+    // tests/run_plantuml_tests.cmake - never %APPDATA%\Tinta.
+    wchar_t exe[MAX_PATH]{};
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    const std::filesystem::path exeDir =
+        std::filesystem::path(exe).parent_path();
+    check(std::filesystem::path(getSettingsPath()).parent_path() == exeDir,
+          "settings resolve inside the isolated portable folder");
+
+    const std::wstring tempPath =
+        (scratchRoot() / L"round-trip" / L"PlantUML Tool.exe").wstring();
+    Settings settings = loadSettings();
+    settings.plantumlPath = toNarrow(tempPath);
+    saveSettings(settings);
+
+    Settings reloaded = loadSettings();
+    check(reloaded.plantumlPath == toNarrow(tempPath),
+          "plantumlPath round-trips through settings.ini");
+    const std::string writtenIni =
+        readTextFile(std::filesystem::path(getSettingsPath()));
+    check(writtenIni.find("plantumlPath=" + toNarrow(tempPath)) !=
+              std::string::npos,
+          "the saved settings.ini carries the plantumlPath value");
+
+    // An empty value round-trips too (and writes no plantumlPath key).
+    settings.plantumlPath.clear();
+    saveSettings(settings);
+    reloaded = loadSettings();
+    check(reloaded.plantumlPath.empty(),
+          "an empty plantumlPath round-trips too");
+    const std::string clearedIni =
+        readTextFile(std::filesystem::path(getSettingsPath()));
+    check(clearedIni.find("plantumlPath=") == std::string::npos,
+          "an empty plantumlPath leaves no settings.ini key");
+}
+
 // --------------------------------------------------------------- no-network gate
 
 void testNoNetworkApis() {
@@ -511,12 +638,26 @@ void testNoNetworkApis() {
 }  // namespace
 
 int main(int argc, char** argv) {
+    bool portable = false;
+    bool expectFailure = false;
     for (int i = 1; i < argc; ++i) {
-        if (std::string(argv[i]) == "--expect-failure") {
-            check(false, "self-check: harness fails as designed");
-            std::cout << "Self-check ran; designed failures: " << failures << '\n';
-            return failures == 0 ? 0 : 1;
-        }
+        const std::string arg = argv[i];
+        if (arg == "--portable-test") portable = true;
+        else if (arg == "--expect-failure") expectFailure = true;
+    }
+
+    // Refuse to run outside CTest's isolated portable folder: the settings
+    // round-trip writes settings.ini and must never reach the user's
+    // %APPDATA%\Tinta. The driver stages the exe beside its own settings.ini.
+    if (!portable || !inIsolatedPortableFolder()) {
+        std::cerr << "Run this test through CTest's isolated portable wrapper\n";
+        return 2;
+    }
+
+    if (expectFailure) {
+        check(false, "self-check: harness fails as designed");
+        std::cout << "Self-check ran; designed failures: " << failures << '\n';
+        return failures == 0 ? 0 : 1;
     }
 
     testLanguageGate();
@@ -529,6 +670,8 @@ int main(int argc, char** argv) {
     testRenderFailureWithImage();
     testRenderTimeout();
     testResolveTool();
+    testResolveToolWithPathSearch();
+    testSettingsRoundTrip();
     testNoNetworkApis();
 
     if (failures == 0) {

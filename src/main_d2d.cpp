@@ -1907,6 +1907,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     app.editorAssists = savedSettings.editorAssists;
     app.frontmatter = savedSettings.frontmatter;
     app.pandocUserPath = toWide(savedSettings.pandocPath);
+    app.plantumlUserPath = toWide(savedSettings.plantumlPath);
     int startTheme = app.followSystemTheme ? autoThemeIndex(app)
                                            : savedSettings.themeIndex;
     app.currentThemeIndex = startTheme;

@@ -24,6 +24,7 @@
 
 #include "markdown.h"
 #include "keymap.h"
+#include "plantuml.h"
 
 using namespace qmd;
 
@@ -246,6 +247,8 @@ struct Settings {
     fm::Settings frontmatter;
     // User-chosen pandoc executable ("" = auto-detect)
     std::string pandocPath;
+    // User-chosen PlantUML tool: plantuml.exe or plantuml.jar ("" = PATH)
+    std::string plantumlPath;
 };
 
 // Application state
@@ -1186,6 +1189,13 @@ struct App {
     std::wstring pandocUserPath;
     bool pandocChecked = false;
     bool pandocRunning = false;
+
+    // PlantUML bridge (plantuml_app.cpp): the resolved tool (a plantuml.exe
+    // or java.exe + plantuml.jar), the user's settings override, and the
+    // resolve-once guard
+    plantuml::Tool plantumlTool;
+    std::wstring plantumlUserPath;
+    bool plantumlChecked = false;
 
     // Unified editor (design t11): one raw buffer, live render beside it;
     // the left tool rail slides in with edit mode carrying the controls

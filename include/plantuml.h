@@ -53,6 +53,14 @@ struct Tool {
 // partial one.
 Tool resolveTool(const std::wstring& userPath);
 
+// Tool discovery for the app bridge: an explicit `userPath` goes straight
+// through resolveTool (a saved path that no longer exists stays unavailable
+// instead of silently falling back to PATH), while an empty path searches
+// PATH for `plantuml.exe` and resolves what it finds. Keeping the precedence
+// here - rather than in the App glue - makes it testable without an App
+// instance. A missing plantuml.exe yields an unavailable tool.
+Tool resolveToolWithPathSearch(const std::wstring& userPath);
+
 // Inserts `preambleLines` immediately after the first `@startuml` line
 // (matched after trimming surrounding whitespace, case-insensitively; a block
 // name after the token, as in `@startuml Flow`, is accepted too).

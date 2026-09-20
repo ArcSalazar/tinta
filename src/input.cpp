@@ -19,6 +19,7 @@
 #include "signals.h"
 #include "tableedit.h"
 #include "pandoc.h"
+#include "plantuml_app.h"
 #include "print.h"
 #include "export.h"
 #include "i18n.h"
@@ -721,6 +722,25 @@ static void settingsAction(App& app, HWND hwnd, int action) {
             ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
             if (GetOpenFileNameW(&ofn)) {
                 pandocSetUserPath(app, path);
+            }
+            break;
+        }
+        case SET_LOCATE_PLANTUML: {
+            // The picker accepts a plantuml.exe or a plantuml.jar; a jar
+            // resolves java.exe from PATH (no second java setting).
+            wchar_t path[MAX_PATH]{};
+            OPENFILENAMEW ofn{};
+            ofn.lStructSize = sizeof(ofn);
+            ofn.hwndOwner = hwnd;
+            ofn.lpstrFilter =
+                L"PlantUML or Java (*.exe;*.jar)\0*.exe;*.jar\0"
+                L"Executables (*.exe)\0*.exe\0"
+                L"Java archives (*.jar)\0*.jar\0\0";
+            ofn.lpstrFile = path;
+            ofn.nMaxFile = MAX_PATH;
+            ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+            if (GetOpenFileNameW(&ofn)) {
+                plantumlSetUserPath(app, path);
             }
             break;
         }

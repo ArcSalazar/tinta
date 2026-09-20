@@ -152,6 +152,25 @@ Tool resolveTool(const std::wstring& userPath) {
     return tool;
 }
 
+Tool resolveToolWithPathSearch(const std::wstring& userPath) {
+    if (!userPath.empty()) return resolveTool(userPath);
+
+    std::wstring found(MAX_PATH, L'\0');
+    DWORD length = SearchPathW(nullptr, L"plantuml.exe", nullptr,
+                               static_cast<DWORD>(found.size()),
+                               found.data(), nullptr);
+    if (length == 0) return Tool();
+    if (length >= found.size()) {
+        found.resize(length);
+        length = SearchPathW(nullptr, L"plantuml.exe", nullptr,
+                             static_cast<DWORD>(found.size()),
+                             found.data(), nullptr);
+        if (length == 0 || length >= found.size()) return Tool();
+    }
+    found.resize(length);
+    return resolveTool(found);
+}
+
 bool injectPreamble(std::string& source, const std::string& preambleLines) {
     const size_t size = source.size();
     size_t insertAt = std::string::npos;

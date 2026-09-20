@@ -87,6 +87,7 @@ set(SOURCES
     src/editrail.cpp
     src/pandoc.cpp
     src/plantuml.cpp
+    src/plantuml_app.cpp
 )
 
 set(HEADERS
@@ -114,6 +115,7 @@ set(HEADERS
     include/selection.h
     include/math_render.h
     include/plantuml.h
+    include/plantuml_app.h
 )
 
 # Windows resource file (icon)
@@ -317,15 +319,28 @@ if(BUILD_TESTING)
 
     # PlantUML core module unit suite: language gate, tool model, preamble
     # injection, cache key, command line and sync render, all driven against
-    # the fake CLI double (no Java needed).
-    add_executable(plantuml_tests tests/plantuml_tests.cpp src/plantuml.cpp)
+    # the fake CLI double (no Java needed), plus the tool-discovery
+    # precedence and the plantumlPath settings round-trip. Both tests run
+    # through a portable driver: the suite exercises saveSettings/loadSettings
+    # on a temp settings.ini and must never touch %APPDATA%\Tinta.
+    add_executable(plantuml_tests tests/plantuml_tests.cpp src/plantuml.cpp
+        src/settings.cpp src/i18n.cpp src/config_dir.cpp
+        src/frontmatter.cpp src/keymap.cpp)
     target_include_directories(plantuml_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-    add_dependencies(plantuml_tests fake_plantuml)
-    target_compile_definitions(plantuml_tests PRIVATE
+    target_link_libraries(plantuml_tests PRIVATE shell32)
+    target_compile_definitions(plantuml_tests PRIVATE UNICODE _UNICODE
         TINTA_FAKE_PLANTUML="$<TARGET_FILE:fake_plantuml>"
         TINTA_PLANTUML_SOURCE="${CMAKE_CURRENT_SOURCE_DIR}/src/plantuml.cpp")
-    add_test(NAME plantuml_parser COMMAND plantuml_tests)
-    add_test(NAME plantuml_parser_selfcheck COMMAND plantuml_tests --expect-failure)
+    add_dependencies(plantuml_tests fake_plantuml)
+    add_test(NAME plantuml_parser COMMAND ${CMAKE_COMMAND}
+        -DTEST_BINARY=$<TARGET_FILE:plantuml_tests>
+        -DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/plantuml-test-$<CONFIG>
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_plantuml_tests.cmake)
+    add_test(NAME plantuml_parser_selfcheck COMMAND ${CMAKE_COMMAND}
+        -DTEST_BINARY=$<TARGET_FILE:plantuml_tests>
+        -DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/plantuml-selfcheck-test-$<CONFIG>
+        -DTEST_ARGS=--expect-failure
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_plantuml_tests.cmake)
     set_tests_properties(plantuml_parser_selfcheck PROPERTIES WILL_FAIL TRUE)
 
     add_executable(document_tests
