@@ -488,6 +488,7 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
         bool hasStrike = run.style.hasStrike;
         D2D1_COLOR_F bgColor = run.style.bgColor;
         float drawYOffset = run.style.drawYOffset + mathTextOffset;
+        bool wrappedCode = false;
 
         std::wstring text;
 
@@ -509,7 +510,18 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
                 LayoutInfo info = createLayout(app, text, format, lineHeight, app.codeTypography);
                 float textWidth = info.width;
 
-                if (x + textWidth > maxX && x > startX) {
+                // Keep fitting code spans atomic. Oversized ones share the
+                // Unicode/cluster-aware wrapping path below, including during
+                // table row measurement, so their chips cannot cover the next
+                // column (#239).
+                if (textWidth + kCodeSpanPadding > maxWidth) {
+                    if (info.layout) info.layout->Release();
+                    wrappedCode = true;
+                    drawYOffset = mathTextOffset + (normalLineHeight - format->GetFontSize() * 1.2f) / 2.0f;
+                    break;
+                }
+
+                if (x + textWidth + kCodeSpanPadding > maxX && x > startX) {
                     x = startX;
                     y += lineHeight;
                 }
@@ -687,6 +699,9 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
 
         if (text.empty()) continue;
 
+        const float runWidth = std::max(0.0f, maxWidth - (wrappedCode ? kCodeSpanPadding : 0.0f));
+        const float runMaxX = startX + runWidth;
+        IDWriteTypography* typography = wrappedCode ? app.codeTypography : app.bodyTypography;
         size_t textDocStart = app.docText.size();
         float linkLineStartX = x;
         float linkLineY = y;
@@ -701,7 +716,7 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
         cumW[0] = 0.0f;
         isBoundary[0] = true;
         isBoundary[text.length()] = true;
-        LayoutInfo measureInfo = createLayout(app, text, format, lineHeight, app.bodyTypography);
+        LayoutInfo measureInfo = createLayout(app, text, format, lineHeight, typography);
         {
             if (measureInfo.layout) {
                 UINT32 clusterCount = 0;
@@ -757,10 +772,15 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
                 info = measureInfo;
                 measureInfo.layout = nullptr;
             } else {
-                info = createLayout(app, segText, format, lineHeight, app.bodyTypography);
+                info = createLayout(app, segText, format, lineHeight, typography);
             }
             float segWidth = widthOf(segStart, segEnd);
-            if (hasBg) {
+            if (wrappedCode) {
+                app.layoutRects.push_back({
+                    D2D1::RectF(segX - 2, y + mathTextOffset, segX + segWidth + kCodeSpanPadding,
+                                y + mathTextOffset + normalLineHeight),
+                    app.theme.codeBackground});
+            } else if (hasBg) {
                 app.layoutRects.push_back({
                     D2D1::RectF(segX - 2, y + mathTextOffset + 1, segX + segWidth + 2,
                                 y + mathTextOffset + normalLineHeight - 1),
@@ -802,7 +822,7 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
             float wordWidth = widthOf(wordStart, wordEnd);
             float wordX = segOpen ? segX + widthOf(segStart, wordStart) : x;
 
-            if (wordX + wordWidth > maxX && wordX > startX) {
+            if (wordX + wordWidth > runMaxX && wordX > startX) {
                 // Unit wraps: flush the current line's segment first
                 flushSegment(lastWordEnd);
                 if (isLink && lastWordEndX > linkLineStartX) {
@@ -829,7 +849,7 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
         while (pos < text.length()) {
             // The next unit runs to the following break opportunity
             size_t bp = pos + 1;
-            while (bp < text.length() && !canBreak[bp]) bp++;
+            while (bp < text.length() && (!canBreak[bp] || !isBoundary[bp])) bp++;
 
             // Trailing spaces belong to the unit but don't participate in
             // the wrap decision and never render at a line start
@@ -837,21 +857,26 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
             while (vis > pos && text[vis - 1] == L' ') vis--;
 
             if (vis > pos) {
-                if (widthOf(pos, vis) > maxWidth) {
+                if (widthOf(pos, vis) > runWidth) {
                     // Emergency break: a single unbreakable unit wider than a
                     // whole line splits at cluster boundaries so nothing is
                     // ever clipped or overlaps a neighbor
                     size_t pieceStart = pos;
-                    while (widthOf(pieceStart, vis) > maxWidth) {
+                    while (widthOf(pieceStart, vis) > runWidth) {
                         size_t lo = pieceStart + 1, hi = vis - 1;
                         while (lo < hi) {
                             size_t mid = (lo + hi + 1) / 2;
-                            if (widthOf(pieceStart, mid) <= maxWidth) lo = mid;
+                            if (widthOf(pieceStart, mid) <= runWidth) lo = mid;
                             else hi = mid - 1;
                         }
                         size_t pieceEnd = lo;
-                        while (pieceEnd > pieceStart + 1 && !isBoundary[pieceEnd]) pieceEnd--;
-                        if (pieceEnd <= pieceStart) pieceEnd = pieceStart + 1;
+                        while (pieceEnd > pieceStart && !isBoundary[pieceEnd]) pieceEnd--;
+                        if (pieceEnd == pieceStart) {
+                            // Even when one cluster is wider than the line,
+                            // never split a surrogate pair or combining mark.
+                            pieceEnd = pieceStart + 1;
+                            while (pieceEnd < vis && !isBoundary[pieceEnd]) pieceEnd++;
+                        }
                         emitWord(pieceStart, pieceEnd);
                         pieceStart = pieceEnd;
                         if (pieceStart >= vis) break;
@@ -877,6 +902,7 @@ static void layoutInlineContent(App& app, const std::vector<ElementPtr>& element
         if (isLink && lastWordEndX > linkLineStartX) {
             addLinkSegment(linkLineStartX, lastWordEndX, linkLineY, linkUrl, color);
         }
+        if (wrappedCode) x += kCodeSpanPadding;
     }
 
     y += lineHeight;
@@ -2782,8 +2808,8 @@ static void layoutTable(App& app, const ElementPtr& elem, float& y, float indent
                 if (mi.layout) mi.layout->Release();
             } else if (!cell->children.empty() && fmt) {
                 // Styled cell: plain-text extraction lies about width —
-                // inline code renders in the mono face plus a padded chip
-                // and never wraps internally, so an under-measured column
+                // inline code renders in the mono face plus a padded chip,
+                // so an under-measured column
                 // pushed chips past the table border. Lay the cell out at
                 // unlimited width with the real renderer and take its
                 // right edge (chip rects included), then roll back.
@@ -2831,11 +2857,18 @@ static void layoutTable(App& app, const ElementPtr& elem, float& y, float indent
     bool fitActive = fitBlockEnabled(app, fitKey);
 
     if (totalWidth > maxWidth && fitActive) {
-        // Fit-to-width override: shrink every column proportionally with
-        // no minimum floor; dense cells wrap hard, nothing scrolls
-        float k = maxWidth / totalWidth;
-        for (int c = 0; c < colCount; c++) colWidths[c] *= k;
-        totalWidth = maxWidth;
+        // Reserve room for padding and at least one full character before
+        // distributing the remaining width. A dense table may still need
+        // scrolling: negative/near-zero cell widths cannot wrap safely.
+        const float floorTotal = minColWidth * colCount;
+        const float available = std::max(0.0f, maxWidth - floorTotal);
+        const float naturalExtra = totalWidth - floorTotal;
+        for (int c = 0; c < colCount; c++) {
+            colWidths[c] = minColWidth + (naturalExtra > 0.0f
+                ? available * ((colWidths[c] - minColWidth) / naturalExtra) : 0.0f);
+        }
+        totalWidth = std::max(maxWidth, floorTotal);
+        app.contentWidth = std::max(app.contentWidth, indent + totalWidth);
         fitCandidate = true;
     } else if (totalWidth > maxWidth) {
         // Floor: at least ~2.5 CJK glyphs per line so no column degenerates
@@ -2875,7 +2908,7 @@ static void layoutTable(App& app, const ElementPtr& elem, float& y, float indent
         for (int c = 0; c < colCount; c++) totalWidth += colWidths[c];
         // Minimum widths can push past maxWidth; the table then joins
         // horizontal scrolling instead of squeezing columns unreadably
-        // (unless the fit toggle squeezes it on purpose)
+        // (the fit toggle uses a smaller floor)
         if (totalWidth > maxWidth + 1.0f) fitCandidate = true;
         app.contentWidth = std::max(app.contentWidth, indent + totalWidth);
     }
