@@ -4,8 +4,11 @@
 // invoke:  plantuml -tpng|-tsvg -charset <enc> -failfast2 -o <outdir> <input.puml>
 // Flags are accepted in any order; the last positional argument is the input
 // file. On success the tool copies the matching fixture from
-// tests/fixtures/plantuml/ into <outdir>/<input-stem>.png|svg (exit 0),
-// creating <outdir> when missing, just like the real CLI.
+// tests/fixtures/plantuml/ into <outdir>/<name>.png|svg (exit 0), creating
+// <outdir> when missing, just like the real CLI. The name follows the real
+// CLI's block rule: a name on the first `@startuml` line (` Name` or
+// `(Name)` form) is written as `<Name>.<ext>`, an unnamed block as
+// `<input-stem>.<ext>`.
 //
 // Test switches (environment variables):
 //   TINTA_FAKE_PLANTUML_EXIT=<code>        exit with that code, write nothing
@@ -24,6 +27,7 @@
 // APIs, no network, and no writes outside the -o directory (except the log).
 
 #include <chrono>
+#include <cctype>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -110,6 +114,63 @@ void appendLog(const std::string& logPath, const std::vector<std::string>& args)
         log << args[i];
     }
     log << '\n';
+}
+
+// The real CLI names a block's output after the block: when the first
+// `@startuml` line carries a name (` Name` or `(Name)` form) the tool writes
+// `<Name>.<ext>`. Returns an empty string when that block is unnamed (or the
+// input cannot be read), which selects the input-stem name.
+std::string sourceBlockName(const std::filesystem::path& input) {
+    std::ifstream in(input, std::ios::binary);
+    if (!in) return {};
+    std::string line;
+    while (std::getline(in, line)) {
+        size_t begin = 0;
+        while (begin < line.size() && (line[begin] == ' ' || line[begin] == '\t')) {
+            ++begin;
+        }
+        if (line.size() - begin < 9) continue;
+        std::string head = line.substr(begin, 9);
+        for (char& c : head) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        if (head != "@startuml") continue;
+        const size_t after = begin + 9;
+        std::string token;
+        if (after < line.size()) {
+            const char separator = line[after];
+            if (separator == ' ' || separator == '\t') {
+                size_t first = after;
+                while (first < line.size() &&
+                       (line[first] == ' ' || line[first] == '\t')) {
+                    ++first;
+                }
+                size_t last = first;
+                while (last < line.size() && line[last] != ' ' &&
+                       line[last] != '\t' && line[last] != '\r') {
+                    ++last;
+                }
+                token = line.substr(first, last - first);
+            } else if (separator == '(') {
+                const size_t close = line.find(')', after + 1);
+                if (close != std::string::npos) {
+                    token = line.substr(after + 1, close - after - 1);
+                }
+            }
+        }
+        while (!token.empty() && (token.back() == '\r' || token.back() == ' ' ||
+                                  token.back() == '\t')) {
+            token.pop_back();
+        }
+        for (char c : token) {
+            if (c == '\\' || c == '/' || c == ':' || c == '*' || c == '?' ||
+                c == '"' || c == '<' || c == '>' || c == '|') {
+                return {};
+            }
+        }
+        return token;
+    }
+    return {};
 }
 
 } // namespace
@@ -217,7 +278,9 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     const std::string stem = fs::path(input).stem().string();
-    const fs::path target = out / fs::path(stem + "." + format);
+    const std::string blockName = sourceBlockName(fs::path(input));
+    const fs::path target =
+        out / fs::path((blockName.empty() ? stem : blockName) + "." + format);
     if (!copyOver(fixture, target)) {
         std::cerr << "fake_plantuml: cannot write " << target.string() << "\n";
         return 1;

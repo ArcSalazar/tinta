@@ -261,6 +261,19 @@ void testPreambleInjection() {
           named.find("skinparam") == 15,
           "preamble follows a named block anchor");
 
+    std::string paren = "@startuml(Flow)\nA -> B\n";
+    check(plantuml::injectPreamble(paren, pre),
+          "parenthesized block anchor is found");
+    check(paren.compare(0, 15, "@startuml(Flow)") == 0 &&
+          paren.find("skinparam") == 16,
+          "preamble follows a parenthesized block anchor");
+
+    std::string json = "@startjson\n{ \"a\": 1 }\n";
+    const std::string jsonBefore = json;
+    check(!plantuml::injectPreamble(json, pre),
+          "a non-UML start tag is not an anchor");
+    check(json == jsonBefore, "a non-UML start tag leaves the source untouched");
+
     std::string atEof = "@startuml";
     check(plantuml::injectPreamble(atEof, pre), "anchor alone still injects");
     check(atEof == "@startuml\nskinparam shadowing false\n",
@@ -902,6 +915,133 @@ void testQueuePermanentFailure() {
           "a new key still renders after a permanent failure");
 }
 
+// ---------------------------------------------------- named-block artifacts
+
+void testRenderNamedBlock() {
+    const plantuml::Tool tool = plantuml::resolveTool(kFakeToolPath);
+
+    const char* sources[] = {
+        "@startuml Flow\nAlice -> Bob: named\n@enduml\n",
+        "@startuml(Flow)\nAlice -> Bob: parenthesized\n@enduml\n",
+    };
+    const char* labels[] = {"named block", "parenthesized block"};
+    for (size_t i = 0; i < 2; ++i) {
+        const std::filesystem::path dir = freshScratch(L"named-render");
+        std::wstring out;
+        std::wstring error;
+        const bool ok = plantuml::renderSync(tool, sources[i], 0, dir.wstring(),
+                                             out, 15000, error);
+        check(ok, (std::string(labels[i]) +
+                   " renders the named artifact through the fake tool")
+                      .c_str());
+        if (!ok) {
+            std::cerr << "  renderSync error: " << toNarrow(error) << '\n';
+            continue;
+        }
+        check(std::filesystem::path(out).filename().wstring() == L"Flow.png",
+              "the named artifact is resolved instead of scrubbed");
+        check(std::filesystem::exists(out) &&
+                  std::filesystem::file_size(out) > 0,
+              "the resolved named artifact exists and is non-empty");
+        check(!std::filesystem::exists(dir / L"input.png"),
+              "a named block leaves no canonical input.png behind");
+    }
+}
+
+void testQueueNamedBlockAdoption() {
+    const plantuml::Tool tool = plantuml::resolveTool(kFakeToolPath);
+    const std::filesystem::path scratch = freshScratch(L"queue-named");
+    std::filesystem::create_directories(scratch);
+    const std::filesystem::path logPath = scratch / L"spawn.log";
+    const ScopedEnv logEnv(L"TINTA_FAKE_PLANTUML_LOG", logPath.c_str());
+
+    plantuml::PlantumlRenderQueue queue;
+    const std::filesystem::path workRoot = scratch / L"work";
+    const uint64_t key = 0x7A01ULL;
+    queue.request(21, key, "@startuml Flow\nAlice -> Bob: named\n@enduml\n", 0,
+                  tool, workRoot.wstring());
+    queue.waitForIdle(5000);
+
+    const std::shared_ptr<const plantuml::Cached> hit = queue.lookup(key);
+    check(hit != nullptr, "a named-block render lands in the cache");
+    if (hit) {
+        check(hit->ok, "the named-block cache entry is a success");
+        check(std::filesystem::path(hit->filePath).filename().wstring() ==
+                  L"Flow.png",
+              "the queue adopts the named artifact");
+        check(std::filesystem::exists(hit->filePath),
+              "the adopted named artifact exists on disk");
+    }
+    check(readLogLines(logPath).size() == 1,
+          "the named block spawns exactly once");
+}
+
+void testQueueRetryCap() {
+    const plantuml::Tool tool = plantuml::resolveTool(kFakeToolPath);
+    const std::filesystem::path scratch = freshScratch(L"queue-retry-cap");
+    std::filesystem::create_directories(scratch);
+    const std::filesystem::path logPath = scratch / L"spawn.log";
+    const ScopedEnv logEnv(L"TINTA_FAKE_PLANTUML_LOG", logPath.c_str());
+    const ScopedEnv exitEnv(L"TINTA_FAKE_PLANTUML_EXIT", L"200");
+
+    plantuml::BackoffConfig backoff;
+    backoff.delaysMs = {50, 80, 120};
+    plantuml::PlantumlRenderQueue queue(backoff);
+    const std::filesystem::path workRoot = scratch / L"work";
+    const uint64_t key = 0x8B01ULL;
+
+    queue.request(31, key, kQueueSource, 0, tool, workRoot.wstring());
+    const size_t bound = 1 + backoff.delaysMs.size();
+    if (!pollUntil([&] { return readLogLines(logPath).size() >= bound; }, 5000,
+                   "the finite retry schedule runs to its cap")) {
+        return;
+    }
+    queue.waitForIdle(5000);
+    // A repeating schedule would spawn again within the last delay (120 ms);
+    // nothing may arrive inside this observation window.
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    check(readLogLines(logPath).size() == bound,
+          "an exhausted schedule stops respawning");
+    check(queue.lookup(key) == nullptr, "a capped key never enters the cache");
+
+    queue.request(31, key, kQueueSource, 0, tool, workRoot.wstring());
+    queue.waitForIdle(5000);
+    check(readLogLines(logPath).size() == bound,
+          "a capped key is never retried after a repeat request");
+}
+
+void testQueueKeyDedup() {
+    const plantuml::Tool tool = plantuml::resolveTool(kFakeToolPath);
+    const std::filesystem::path scratch = freshScratch(L"queue-key-dedup");
+    std::filesystem::create_directories(scratch);
+    const std::filesystem::path logPath = scratch / L"spawn.log";
+    const ScopedEnv logEnv(L"TINTA_FAKE_PLANTUML_LOG", logPath.c_str());
+
+    plantuml::PlantumlRenderQueue queue;
+    const std::filesystem::path workRoot = scratch / L"work";
+    const uint64_t key = 0x9C01ULL;
+
+    // Two blocks, one render: the second request must attach to the first
+    // job - pending, in flight, or finished but not yet drained - instead of
+    // scheduling another spawn.
+    queue.request(41, key, kQueueSource, 0, tool, workRoot.wstring());
+    queue.request(42, key, kQueueSource, 0, tool, workRoot.wstring());
+    queue.waitForIdle(5000);
+
+    check(readLogLines(logPath).size() == 1,
+          "two blocks sharing a key spawn the tool exactly once");
+    const std::shared_ptr<const plantuml::Cached> hit = queue.lookup(key);
+    check(hit != nullptr && hit->ok, "the shared render lands in the cache");
+    if (hit) {
+        check(hit->spawnCount == 1, "the shared render counts one spawn");
+    }
+
+    queue.request(41, key, kQueueSource, 0, tool, workRoot.wstring());
+    queue.request(42, key, kQueueSource, 0, tool, workRoot.wstring());
+    queue.waitForIdle(5000);
+    check(readLogLines(logPath).size() == 1, "cached keys never respawn");
+}
+
 void testQueueShutdown() {
     const plantuml::Tool tool = plantuml::resolveTool(kFakeToolPath);
     const std::filesystem::path scratch = freshScratch(L"queue-shutdown");
@@ -1035,6 +1175,10 @@ int main(int argc, char** argv) {
     testQueueLruEviction();
     testQueueBackoffRetry();
     testQueuePermanentFailure();
+    testRenderNamedBlock();
+    testQueueNamedBlockAdoption();
+    testQueueRetryCap();
+    testQueueKeyDedup();
     testQueueShutdown();
     testSweepStaleTempRoots();
     testNoNetworkApis();

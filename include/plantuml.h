@@ -16,6 +16,9 @@
 //     theme preamble is injected immediately AFTER the anchor line
 //     (injectPreamble);
 //   - `-failfast2` suppresses the error-image artifact on syntax errors;
+//   - a block named with the space form (`@startuml Flow`) makes the tool
+//     write `Flow.png` instead of `<input-stem>.png`, so renderSync resolves
+//     more than the canonical input name;
 //   - exit 100 means "no diagram in this source", 200 a syntax error.
 
 #include <cstdint>
@@ -46,8 +49,8 @@ struct Tool {
 // Resolves a user-configured path into a runnable tool:
 //   - an empty path yields an unavailable tool;
 //   - a case-insensitive ".jar" suffix is treated as a jar: the file must
-//     exist and java.exe must be found via SearchPathW (the java runtime is
-//     resolved from PATH; there is deliberately no second java setting);
+//     exist and java.exe must be found through the standard Windows search
+//     order (PATH included; there is deliberately no second java setting);
 //   - anything else is treated as an executable and must exist.
 // Missing files and a missing java.exe yield an unavailable tool, never a
 // partial one.
@@ -55,15 +58,17 @@ Tool resolveTool(const std::wstring& userPath);
 
 // Tool discovery for the app bridge: an explicit `userPath` goes straight
 // through resolveTool (a saved path that no longer exists stays unavailable
-// instead of silently falling back to PATH), while an empty path searches
-// PATH for `plantuml.exe` and resolves what it finds. Keeping the precedence
-// here - rather than in the App glue - makes it testable without an App
+// instead of silently falling back to a search), while an empty path runs
+// SearchPathW's default order (application directory, current directory,
+// system directories, PATH) for `plantuml.exe` and resolves what it finds.
+// Keeping that precedence here - rather than in the App glue - makes it
 // instance. A missing plantuml.exe yields an unavailable tool.
 Tool resolveToolWithPathSearch(const std::wstring& userPath);
 
 // Inserts `preambleLines` immediately after the first `@startuml` line
 // (matched after trimming surrounding whitespace, case-insensitively; a block
-// name after the token, as in `@startuml Flow`, is accepted too).
+// name after the token, as in `@startuml Flow`, and a parenthesized name, as
+// in `@startuml(Flow)`, are accepted too; other `@start*` tags are not).
 //
 // Returns false when the source has no `@startuml` anchor: the caller treats
 // that source as unusable and falls back to showing it as code. There is
@@ -114,10 +119,16 @@ std::wstring buildCommandLine(const Tool& tool, int format,
 // timeout (an INFINITE budget is rejected: every spawn stays bounded).
 //
 // The exit code is validated FIRST: on any failure (non-zero exit, timeout,
-// missing or empty output) the private workDir is scrubbed of every image
+// or no usable artifact) the private workDir is scrubbed of every image
 // artifact the tool may have written plus the staged source, `error` is set
-// and `outFile` stays empty. Only a zero exit with a non-empty
-// `workDir\input.png|svg` returns true and sets `outFile`.
+// and `outFile` stays empty.
+//
+// A zero exit resolves the artifact in this order: the canonical
+// `workDir\input.png|svg`; then the named-block artifact `<Name>.png|svg`
+// parsed from the anchor line (`@startuml Flow` / `@startuml(Flow)`); then
+// the single remaining `*.png|svg` file in workDir (lexicographically first
+// when the tool wrote several). Only a resolved non-empty artifact returns
+// true and sets `outFile`.
 //
 // This is the deliberate synchronous entry point used by print and export;
 // the interactive layout path must schedule it off the UI thread instead.

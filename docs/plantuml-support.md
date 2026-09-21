@@ -33,13 +33,13 @@ Viewer --> Editor : OK
 @enduml
 ```
 
-Only the first `@startuml` block of a source is rendered, and the anchor is required. Tinta never auto-wraps an unanchored source: PlantUML ignores `skinparam` lines written before `@startuml`, so silently adding a wrapper would change where your theme statements apply. Unanchored text stays a readable code block.
+Only the first `@startuml` block of a source is rendered, and the anchor is required - it may carry a block name, in either the `@startuml Flow` or the `@startuml(Flow)` form. Non-UML start tags such as `@startjson`, `@startyaml` or `@startmindmap` are not detected. Tinta never auto-wraps an unanchored source: PlantUML ignores `skinparam` lines written before `@startuml`, so silently adding a wrapper would change where your theme statements apply. Unanchored text stays a readable code block.
 
 ## How rendering works
 
 Before spawning the tool, Tinta injects `skinparam` lines right after the `@startuml` anchor: a transparent background, shadowing off, and the active theme's font family, size and text color. The preview and the HTML/DOCX exports therefore follow your theme; printing and PDF export always use the light Paper palette, by design.
 
-The preview renders in the background: each diagram appears as its process finishes, results are cached per source and theme, repeated transient failures back off before being retried, and a source the tool outright rejects stops being retried until you edit it. Print, PDF and the HTML/DOCX exports render synchronously with bounded timeouts, so a wedged tool degrades to source instead of hanging the document.
+The preview renders in the background: each diagram appears as its process finishes, results are cached per source and theme, repeated transient failures back off before being retried (the retry schedule is finite), and a source the tool outright rejects stops being retried until you edit it. Print, PDF and the HTML/DOCX exports render synchronously with bounded timeouts: print and PDF give each diagram 15 seconds with a 30-second budget for the whole document, and an HTML or DOCX export gives each fence 20 seconds with a 60-second budget per export. A wedged tool therefore degrades to source instead of hanging the document.
 
 Exports carry the real artifacts: the HTML inlines the SVG that PlantUML produced, the DOCX embeds a PNG at the tool's natural 1x size, and the copy button on a diagram puts a 2x PNG on the clipboard, composited over the theme background.
 
@@ -50,7 +50,7 @@ Whenever no tool is configured, a source lacks the `@startuml` anchor, or a rend
 - **The row still shows the hint after Browse.** The picked file is not runnable. For a jar, check that `java.exe` is on your `PATH`: run `java -version` in a terminal, install a JDK or JRE if that fails, then reopen Settings.
 - **A diagram shows as source although the tool resolved.** Check the `@startuml`/`@enduml` anchor. Multi-block sources render only their first block. A PlantUML error also leaves the source: run the same text through the tool on the command line to read its message.
 - **The first diagram is slow, later ones are instant.** A cold Java process takes time to start. Once rendered, a diagram is cached.
-- **A diagram occasionally falls back to source.** A render that outlives its bounded timeout is abandoned and the source is shown instead. Large or complex diagrams can hit this; split them or use a faster tool.
+- **A diagram occasionally falls back to source.** A render that outlives its bounded timeout is abandoned and the source is shown instead: 15 seconds per diagram during print and PDF, 20 seconds per fence in HTML and DOCX exports. Large or complex diagrams can hit this; split them or use a faster tool.
 - **Embedded diagrams look soft in Word or on high-DPI screens.** The DOCX embeds the PNG at its natural 1x size. Use the copy button for the 2x image, or open the HTML export for crisp vectors.
 - **Printed diagrams do not match the dark theme.** Print always uses the light Paper palette by design; the preview and the HTML/DOCX exports keep your theme colors.
 

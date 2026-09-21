@@ -8,8 +8,9 @@
 //
 // Ownership and locking (the whole concurrency contract):
 //   - ONE std::mutex + two condition variables guard ONLY the pending-job
-//     map, the finished handoff, the permanentKeys set, the toDelete list
-//     and the running/stop/started flags. Every other member has an owner.
+//     list, the running job's key and block set, the finished handoff, the
+//     permanentKeys set, the toDelete list and the running/stop/started
+//     flags. Every other member has an owner.
 //   - The rendered-image cache (key -> Cached + LRU order) is owner-thread
 //     ONLY: read in lookup(), mutated ONLY in drainFinished(). The worker
 //     never touches it and it is never under the mutex.
@@ -19,7 +20,9 @@
 //
 // Scheduling semantics: a job waiting out its retry backoff window is
 // SCHEDULED, not busy - it does not slow waitForIdle() down (so a 60 s
-// backoff never blocks a caller), and its retry fires automatically.
+// backoff never blocks a caller), and its retry fires automatically. The
+// schedule is FINITE: once BackoffConfig::delaysMs is exhausted, and also
+// when the tool exits 0 without a usable artifact, the key is permanent.
 
 #include <chrono>
 #include <condition_variable>
@@ -39,7 +42,8 @@
 namespace plantuml {
 
 // Retry delays for a failed render, indexed by attempt number: the first
-// retry waits delaysMs[0], and the last entry repeats for later attempts.
+// retry waits delaysMs[0], the second delaysMs[1], and so on. The schedule
+// is finite: after delaysMs.size() failed retries the key becomes permanent.
 struct BackoffConfig {
     std::vector<int> delaysMs{5000, 15000, 60000};
 };
@@ -70,10 +74,12 @@ public:
     // Publishes a render request for `blockId` (the layout block that
     // wants the image). Owner thread only. No-op when the queue is shut
     // down, when `key` is already cached, or when `key` is permanently
-    // unrenderable. Replacing a pending request for the same block drops
-    // the superseded job's work directory; repeating the request for the
-    // key already scheduled keeps its schedule, so a retry backoff window
-    // is never reset by a duplicate request.
+    // unrenderable. When the key is already pending, in flight, or finished
+    // but not yet drained, the block attaches to that job instead of
+    // scheduling a second spawn; the existing schedule - notably a retry
+    // backoff window - is kept, so duplicates never reset it. Replacing a
+    // pending request for the same block with a new key detaches the block
+    // and drops the superseded job's work directory.
     void request(size_t blockId, uint64_t key, std::string finalSource,
                  int format, const Tool& tool, std::wstring workRoot);
 
@@ -105,7 +111,9 @@ public:
 
 private:
     struct Job {
-        size_t blockId = 0;
+        // Every layout block waiting on this render, first requester first;
+        // key-level dedup attaches further blocks instead of enqueueing.
+        std::vector<size_t> blockIds;
         uint64_t key = 0;
         std::string source;
         int format = 0;
@@ -138,13 +146,15 @@ private:
     std::condition_variable idleCv_;
 
     // Guarded by mutex_.
-    std::unordered_map<size_t, Job> pending_;
+    std::vector<Job> pending_;  // scheduled renders, one entry per cache key
     std::vector<Finished> finished_;
     std::unordered_set<uint64_t> permanentKeys_;
     std::vector<std::wstring> toDelete_;
     std::function<void(uint64_t, bool)> completion_;
     uint64_t nextSeq_ = 0;
     bool running_ = false;
+    uint64_t activeKey_ = 0;              // key of the running render
+    std::vector<size_t> activeBlockIds_;  // its blocks (attachments included)
     bool stop_ = false;
     bool started_ = false;
     bool shutDown_ = false;

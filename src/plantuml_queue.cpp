@@ -31,6 +31,21 @@ bool isAllDigits(const std::wstring& text) {
     return true;
 }
 
+// Block bookkeeping for a job shared by several layout blocks (key-level
+// dedup): attach is idempotent, detach reports whether the block was there.
+void attachBlockId(std::vector<size_t>& blockIds, size_t blockId) {
+    if (std::find(blockIds.begin(), blockIds.end(), blockId) == blockIds.end()) {
+        blockIds.push_back(blockId);
+    }
+}
+
+bool detachBlockId(std::vector<size_t>& blockIds, size_t blockId) {
+    const auto it = std::find(blockIds.begin(), blockIds.end(), blockId);
+    if (it == blockIds.end()) return false;
+    blockIds.erase(it);
+    return true;
+}
+
 }  // namespace
 
 std::wstring keyHex(uint64_t key) {
@@ -110,13 +125,55 @@ void PlantumlRenderQueue::request(size_t blockId, uint64_t key,
     if (shutDown_) return;
     if (permanentKeys_.count(key) != 0) return;
 
+    // Key-level dedup: the same render already scheduled, in flight, or
+    // finished but not yet drained must never spawn a second process. The
+    // block is attached to the job that owns the key - the block set travels
+    // with the job, so per-block coalescing stays meaningful - and the
+    // existing schedule (notably a retry backoff window) is kept.
+    for (Job& pending : pending_) {
+        if (pending.key != key) continue;
+        attachBlockId(pending.blockIds, blockId);
+        lock.unlock();
+        return;
+    }
+    if (running_ && activeKey_ == key) {
+        attachBlockId(activeBlockIds_, blockId);
+        lock.unlock();
+        return;
+    }
+    for (const Finished& record : finished_) {
+        if (record.key == key) {
+            // The worker already produced the outcome; drainFinished() will
+            // adopt it. No second spawn.
+            lock.unlock();
+            return;
+        }
+    }
+
     if (!started_) {
         started_ = true;
         worker_ = std::thread(&PlantumlRenderQueue::workerLoop, this);
     }
 
+    // Per-block coalescing: a request with a new key supersedes this block's
+    // waiting job. The block may also be attached to a shared job (key-level
+    // dedup); detach it there too, dropping that job - and its work
+    // directory - only when no block waits on it anymore.
+    for (auto it = pending_.begin(); it != pending_.end();) {
+        if (!detachBlockId(it->blockIds, blockId)) {
+            ++it;
+            continue;
+        }
+        if (!it->blockIds.empty()) {
+            ++it;
+            continue;
+        }
+        toDelete_.push_back(std::move(it->workDir));
+        it = pending_.erase(it);
+    }
+
     Job job;
-    job.blockId = blockId;
+    job.blockIds.push_back(blockId);
     job.key = key;
     job.source = std::move(finalSource);
     job.format = format;
@@ -129,20 +186,7 @@ void PlantumlRenderQueue::request(size_t blockId, uint64_t key,
     job.workDir += keyHex(key);
     job.notBefore = std::chrono::steady_clock::now();
     job.seq = nextSeq_++;
-
-    const auto existing = pending_.find(blockId);
-    if (existing != pending_.end()) {
-        if (existing->second.key == key) {
-            // Same render already scheduled for this block: keep the
-            // existing schedule (notably a retry backoff window) instead
-            // of resetting it to now.
-            lock.unlock();
-            return;
-        }
-        toDelete_.push_back(std::move(existing->second.workDir));
-        pending_.erase(existing);
-    }
-    pending_.emplace(blockId, std::move(job));
+    pending_.push_back(std::move(job));
     lock.unlock();
     workCv_.notify_all();
 }
@@ -202,7 +246,12 @@ size_t PlantumlRenderQueue::drainFinished() {
 }
 
 void PlantumlRenderQueue::waitForIdle(int maxWaitMs) {
-    if (shutDown_) return;
+    {
+        // shutDown_ is guarded by the mutex; read it under the lock even
+        // though both call sites currently live on the owner thread.
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (shutDown_) return;
+    }
     const int budget = maxWaitMs < 0 ? 0 : maxWaitMs;
     const auto deadline =
         std::chrono::steady_clock::now() + std::chrono::milliseconds(budget);
@@ -213,8 +262,8 @@ void PlantumlRenderQueue::waitForIdle(int maxWaitMs) {
             if (shutDown_) return;
             const auto now = std::chrono::steady_clock::now();
             bool due = false;
-            for (const auto& entry : pending_) {
-                if (entry.second.notBefore <= now) {
+            for (const Job& entry : pending_) {
+                if (entry.notBefore <= now) {
                     due = true;
                     break;
                 }
@@ -237,7 +286,7 @@ void PlantumlRenderQueue::shutdown() {
     if (worker_.joinable()) worker_.join();
 
     std::lock_guard<std::mutex> lock(mutex_);
-    for (auto& entry : pending_) removeDirTree(entry.second.workDir);
+    for (Job& entry : pending_) removeDirTree(entry.workDir);
     pending_.clear();
     for (const Finished& record : finished_) removeDirTree(record.workDir);
     finished_.clear();
@@ -262,17 +311,17 @@ void PlantumlRenderQueue::workerLoop() {
                 const auto now = std::chrono::steady_clock::now();
                 auto best = pending_.end();
                 for (auto it = pending_.begin(); it != pending_.end(); ++it) {
-                    const Job& candidate = it->second;
+                    const Job& candidate = *it;
                     if (candidate.notBefore > now) continue;
                     if (best == pending_.end() ||
-                        candidate.notBefore < best->second.notBefore ||
-                        (candidate.notBefore == best->second.notBefore &&
-                         candidate.seq < best->second.seq)) {
+                        candidate.notBefore < best->notBefore ||
+                        (candidate.notBefore == best->notBefore &&
+                         candidate.seq < best->seq)) {
                         best = it;
                     }
                 }
                 if (best != pending_.end()) {
-                    job = std::move(best->second);
+                    job = std::move(*best);
                     pending_.erase(best);
                     break;
                 }
@@ -281,9 +330,9 @@ void PlantumlRenderQueue::workerLoop() {
                 if (pending_.empty()) {
                     workCv_.wait(lock);
                 } else {
-                    auto next = pending_.begin()->second.notBefore;
-                    for (const auto& entry : pending_) {
-                        next = std::min(next, entry.second.notBefore);
+                    auto next = pending_.front().notBefore;
+                    for (const Job& entry : pending_) {
+                        next = std::min(next, entry.notBefore);
                     }
                     workCv_.wait_until(lock, next);
                 }
@@ -296,6 +345,8 @@ void PlantumlRenderQueue::workerLoop() {
                 continue;
             }
             running_ = true;
+            activeKey_ = job.key;
+            activeBlockIds_ = job.blockIds;
         }
 
         const uint64_t jobKey = job.key;
@@ -310,6 +361,9 @@ void PlantumlRenderQueue::workerLoop() {
         {
             std::unique_lock<std::mutex> lock(mutex_);
             running_ = false;
+            activeKey_ = 0;
+            std::vector<size_t> attemptBlocks = std::move(activeBlockIds_);
+            activeBlockIds_.clear();
             if (ok) {
                 Finished record;
                 record.key = jobKey;
@@ -321,8 +375,10 @@ void PlantumlRenderQueue::workerLoop() {
                 finished_.push_back(std::move(record));
                 attempts_.erase(jobKey);
                 notBefore_.erase(jobKey);
-            } else if (exitCode == 100) {
-                // Exit 100 means "no diagram in this source": permanent.
+            } else if (exitCode == 100 || exitCode == 0) {
+                // Exit 100 means "no diagram in this source"; exit 0 without
+                // a usable artifact (after renderSync's resolution rules)
+                // means the same for this key. Both are permanent.
                 permanentKeys_.insert(jobKey);
                 removeDirTree(job.workDir);
                 Finished record;
@@ -334,26 +390,47 @@ void PlantumlRenderQueue::workerLoop() {
                 notBefore_.erase(jobKey);
             } else {
                 const int attempt = ++attempts_[jobKey];
-                int delayMs = 0;
-                if (!backoff_.delaysMs.empty()) {
-                    const size_t index =
-                        std::min(static_cast<size_t>(attempt - 1),
-                                 backoff_.delaysMs.size() - 1);
-                    delayMs = backoff_.delaysMs[index];
-                }
-                const auto retryAt = std::chrono::steady_clock::now() +
-                                     std::chrono::milliseconds(delayMs);
-                notBefore_[jobKey] = retryAt;
-                Job retry = std::move(job);
-                retry.notBefore = retryAt;
-                const auto existing = pending_.find(retry.blockId);
-                if (existing == pending_.end() ||
-                    existing->second.key == retry.key) {
-                    pending_[retry.blockId] = std::move(retry);
+                if (static_cast<size_t>(attempt) > backoff_.delaysMs.size()) {
+                    // The finite retry schedule is exhausted: permanent.
+                    permanentKeys_.insert(jobKey);
+                    removeDirTree(job.workDir);
+                    Finished record;
+                    record.key = jobKey;
+                    record.ok = false;
+                    record.workDir = job.workDir;
+                    finished_.push_back(std::move(record));
+                    attempts_.erase(jobKey);
+                    notBefore_.erase(jobKey);
                 } else {
-                    // A newer key replaced this block while we rendered: the
-                    // failed image is dropped, the newest job stays queued.
-                    removeDirTree(retry.workDir);
+                    const int delayMs =
+                        backoff_.delaysMs[static_cast<size_t>(attempt - 1)];
+                    const auto retryAt = std::chrono::steady_clock::now() +
+                                         std::chrono::milliseconds(delayMs);
+                    notBefore_[jobKey] = retryAt;
+                    // Drop every block that received a newer key while this
+                    // attempt ran; the retry stays only while a block still
+                    // waits on it.
+                    std::vector<size_t> keep;
+                    for (size_t blockId : attemptBlocks) {
+                        bool superseded = false;
+                        for (const Job& waiting : pending_) {
+                            if (std::find(waiting.blockIds.begin(),
+                                          waiting.blockIds.end(),
+                                          blockId) != waiting.blockIds.end()) {
+                                superseded = true;
+                                break;
+                            }
+                        }
+                        if (!superseded) keep.push_back(blockId);
+                    }
+                    if (keep.empty()) {
+                        removeDirTree(job.workDir);
+                    } else {
+                        Job retry = std::move(job);
+                        retry.blockIds = std::move(keep);
+                        retry.notBefore = retryAt;
+                        pending_.push_back(std::move(retry));
+                    }
                 }
             }
             callback = completion_;

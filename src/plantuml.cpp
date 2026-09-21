@@ -5,6 +5,7 @@
 
 #include "plantuml.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cwctype>
@@ -66,8 +67,10 @@ bool hasJarSuffix(const std::wstring& path) {
 
 // Trims spaces, tabs and a CR terminator from a line range and matches the
 // PlantUML anchor case-insensitively: the exact token `@startuml`, or the
-// token followed by whitespace (a named block such as `@startuml Flow`).
-// A lookalike such as `@startumlx` never matches.
+// token followed by a block-name separator - whitespace (`@startuml Flow`)
+// or an opening parenthesis (`@startuml(Flow)`). A lookalike such as
+// `@startumlx`, and every non-UML start tag (`@startjson`, `@startyaml`,
+// ...), never matches.
 bool isAnchorLine(const std::string& source, size_t begin, size_t end) {
     while (begin < end && (source[begin] == ' ' || source[begin] == '\t')) ++begin;
     while (end > begin && (source[end - 1] == ' ' || source[end - 1] == '\t' ||
@@ -84,7 +87,138 @@ bool isAnchorLine(const std::string& source, size_t begin, size_t end) {
     }
     if (end - begin == anchorLen) return true;
     const char after = source[begin + anchorLen];
-    return after == ' ' || after == '\t';
+    return after == ' ' || after == '\t' || after == '(';
+}
+
+// UTF-8 (CP_UTF8) to wide for artifact names parsed out of the source.
+std::wstring utf8ToWide(const std::string& text) {
+    if (text.empty()) return std::wstring();
+    const int length = MultiByteToWideChar(CP_UTF8, 0, text.c_str(),
+                                           static_cast<int>(text.size()),
+                                           nullptr, 0);
+    if (length <= 0) return std::wstring();
+    std::wstring out(static_cast<size_t>(length), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, text.c_str(), static_cast<int>(text.size()),
+                        out.data(), length);
+    return out;
+}
+
+// A block name is used verbatim as an artifact file name, so anything that
+// could escape the private work directory or confuse the file APIs is
+// rejected and the unnamed path is taken instead.
+bool isSafeArtifactName(const std::string& name) {
+    if (name.empty() || name == "." || name == "..") return false;
+    for (char c : name) {
+        if (c == '\\' || c == '/' || c == ':' || c == '*' || c == '?' ||
+            c == '"' || c == '<' || c == '>' || c == '|') {
+            return false;
+        }
+    }
+    return true;
+}
+
+// The block name on the first `@startuml` anchor line, accepting both the
+// `@startuml Flow` and the `@startuml(Flow)` forms. Returns an empty string
+// when the first block is unnamed (or no anchor exists at all): the tool
+// then names its output after the input file stem.
+std::wstring namedBlockToken(const std::string& source) {
+    const size_t size = source.size();
+    size_t pos = 0;
+    while (pos <= size) {
+        const size_t newline = source.find('\n', pos);
+        const size_t lineEnd = newline == std::string::npos ? size : newline;
+        if (isAnchorLine(source, pos, lineEnd)) {
+            size_t begin = pos;
+            while (begin < lineEnd &&
+                   (source[begin] == ' ' || source[begin] == '\t')) {
+                ++begin;
+            }
+            const size_t after = begin + 9;  // strlen("@startuml")
+            std::string token;
+            if (after < lineEnd) {
+                const char separator = source[after];
+                if (separator == ' ' || separator == '\t') {
+                    size_t first = after;
+                    while (first < lineEnd && (source[first] == ' ' ||
+                                               source[first] == '\t')) {
+                        ++first;
+                    }
+                    size_t last = first;
+                    while (last < lineEnd && source[last] != ' ' &&
+                           source[last] != '\t' && source[last] != '\r') {
+                        ++last;
+                    }
+                    token.assign(source, first, last - first);
+                } else if (separator == '(') {
+                    const size_t close = source.find(')', after + 1);
+                    if (close != std::string::npos && close <= lineEnd) {
+                        token.assign(source, after + 1, close - (after + 1));
+                    }
+                }
+            }
+            if (!isSafeArtifactName(token)) return std::wstring();
+            return utf8ToWide(token);
+        }
+        if (newline == std::string::npos) break;
+        pos = newline + 1;
+    }
+    return std::wstring();
+}
+
+// Locates the image the tool produced in `workDir`, in the real tool's own
+// naming order:
+//   1. the canonical `input.<ext>` (an unnamed single block);
+//   2. the named-block artifact `<Name>.<ext>` parsed from the anchor line
+//      (the tool writes `Flow.png` for `@startuml Flow`);
+//   3. the only remaining `*.<ext>` file (lexicographically first when the
+//      source produced several, as in multi-block sources).
+// Every candidate must be a non-empty regular file. Returns an empty path
+// when nothing usable exists.
+std::filesystem::path resolveArtifact(const std::filesystem::path& workDir,
+                                      const std::string& sourceWithPreamble,
+                                      int format, std::error_code& ec) {
+    const std::wstring suffix = format == 1 ? L".svg" : L".png";
+    auto usable = [](const std::filesystem::path& candidate) {
+        std::error_code localEc;
+        if (!std::filesystem::is_regular_file(candidate, localEc) || localEc) {
+            return false;
+        }
+        const uintmax_t bytes = std::filesystem::file_size(candidate, localEc);
+        return !localEc && bytes > 0;
+    };
+
+    const std::filesystem::path canonical = workDir / (L"input" + suffix);
+    if (usable(canonical)) return canonical;
+
+    const std::wstring token = namedBlockToken(sourceWithPreamble);
+    if (!token.empty()) {
+        const std::filesystem::path named = workDir / (token + suffix);
+        if (usable(named)) return named;
+    }
+
+    std::vector<std::filesystem::path> candidates;
+    std::filesystem::directory_iterator it(workDir, ec);
+    const std::filesystem::directory_iterator end;
+    while (!ec && it != end) {
+        const std::filesystem::directory_entry entry = *it;
+        it.increment(ec);
+        std::error_code typeEc;
+        if (!entry.is_regular_file(typeEc) || typeEc) continue;
+        std::wstring extension = entry.path().extension().wstring();
+        for (wchar_t& c : extension) {
+            c = static_cast<wchar_t>(std::towlower(c));
+        }
+        if (extension != suffix) continue;
+        if (!usable(entry.path())) continue;
+        candidates.push_back(entry.path());
+    }
+    if (candidates.empty()) return std::filesystem::path();
+    std::sort(candidates.begin(), candidates.end(),
+              [](const std::filesystem::path& left,
+                 const std::filesystem::path& right) {
+                  return left.wstring() < right.wstring();
+              });
+    return candidates.front();
 }
 
 // Removes every image artifact and any staged source from the private
@@ -154,6 +288,9 @@ Tool resolveTool(const std::wstring& userPath) {
 
 Tool resolveToolWithPathSearch(const std::wstring& userPath) {
     if (!userPath.empty()) return resolveTool(userPath);
+    // SearchPathW runs its default search order, not PATH alone: the
+    // application directory and the current directory are searched before
+    // the system directories.
 
     std::wstring found(MAX_PATH, L'\0');
     DWORD length = SearchPathW(nullptr, L"plantuml.exe", nullptr,
@@ -359,17 +496,12 @@ bool renderSync(const Tool& tool, const std::string& sourceWithPreamble,
         return false;
     }
 
-    const std::wstring name = fmt == 1 ? L"input.svg" : L"input.png";
-    const std::filesystem::path artifact = dir / name;
-    bool usable = false;
-    if (std::filesystem::is_regular_file(artifact, ec) && !ec) {
-        const uintmax_t size = std::filesystem::file_size(artifact, ec);
-        usable = !ec && size > 0;
-    }
-    if (!usable) {
+    const std::filesystem::path artifact =
+        resolveArtifact(dir, sourceWithPreamble, fmt, ec);
+    if (artifact.empty()) {
         if (exitCodeOut != nullptr) *exitCodeOut = static_cast<int>(exitCode);
         scrubWorkDir(dir);
-        error = L"PlantUML produced no usable image (" + name + L")";
+        error = L"PlantUML produced no usable image";
         return false;
     }
     if (exitCodeOut != nullptr) *exitCodeOut = 0;
