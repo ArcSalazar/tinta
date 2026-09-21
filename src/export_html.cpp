@@ -1067,7 +1067,8 @@ std::string colorHexNoHash(D2D1_COLOR_F c) {
 
 // Render one PlantUML fence synchronously through the configured tool and
 // return its SVG text. The preamble mirrors the preview's: live theme font
-// family + kDiagramFontSize + the Role::Text hex, no new colors. An empty
+// family + kDiagramFontSize + the Role::Text hex, plus the Fill and Stroke
+// hexes on dark palettes so exported SVGs stay legible there too. An empty
 // return means no inline diagram: missing tool, source without @startuml,
 // render failure/timeout or exhausted budget; the caller then emits the
 // source-code block unchanged.
@@ -1086,7 +1087,12 @@ std::string plantumlFenceSvg(ExportCtx& ctx, const std::string& code) {
     const std::string preambleText = plantuml::preamble(
         wideToUtf8Str(ctx.app.theme.fontFamily), kDiagramFontSize,
         colorHexNoHash(
-            resolveDiagramRole(ctx.app, colorPrim, mermaidext::Role::Text)));
+            resolveDiagramRole(ctx.app, colorPrim, mermaidext::Role::Text)),
+        ctx.app.theme.isDark,
+        colorHexNoHash(
+            resolveDiagramRole(ctx.app, colorPrim, mermaidext::Role::Fill)),
+        colorHexNoHash(
+            resolveDiagramRole(ctx.app, colorPrim, mermaidext::Role::Stroke)));
 
     std::string sourceWithPreamble = code;
     if (!plantuml::injectPreamble(sourceWithPreamble, preambleText)) return {};

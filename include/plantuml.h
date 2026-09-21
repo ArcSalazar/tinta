@@ -91,8 +91,22 @@ bool injectPreamble(std::string& source, const std::string& preambleLines);
 //   skinparam defaultFontSize <fontBaseSize>
 //   skinparam defaultFontColor <textColorHex>
 // Integral sizes print without a decimal point (14, not 14.0).
+//
+// Light palettes return exactly those five lines, byte for byte: PlantUML's
+// own light fills and dark strokes already read correctly on a light page,
+// and existing cache keys must not shift.
+//
+// `darkPalette` is the active palette's own dark flag (D2DTheme::isDark).
+// On a dark palette the block continues with every shape fill and stroke
+// themed, so nothing is left at PlantUML's light-page defaults: fillColorHex
+// (the palette surface its text is designed to sit on) paints backgrounds,
+// strokeColorHex (the accent) paints borders, arrows and lifelines, and
+// textColorHex keeps the text. Unknown skinparam names are ignored by the
+// tool, so the set covers families whose names may drift between releases.
 std::string preamble(const std::string& fontFamily, float fontBaseSize,
-                     const std::string& textColorHex);
+                     const std::string& textColorHex, bool darkPalette,
+                     const std::string& fillColorHex,
+                     const std::string& strokeColorHex);
 
 // Stable 64-bit FNV-1a over every rendering input: source, preamble, tool
 // path, tool stamp and output format (0=png, 1=svg). Equal inputs hash equal

@@ -37,7 +37,7 @@ Only the first `@startuml` block of a source is rendered, and the anchor is requ
 
 ## How rendering works
 
-Before spawning the tool, Tinta injects `skinparam` lines right after the `@startuml` anchor: a transparent background, shadowing off, and the active theme's font family, size and text color. The preview and the HTML/DOCX exports therefore follow your theme; printing and PDF export always use the light Paper palette, by design.
+Before spawning the tool, Tinta injects `skinparam` lines right after the `@startuml` anchor: a transparent background, shadowing off, and the active theme's font family, size and text color. On dark palettes the injection also themes every shape fill, border, arrow and lifeline - fills take the palette surface its text is designed to sit on, borders and strokes take the accent - so a diagram is not left at PlantUML's light-page defaults; light palettes keep PlantUML's own colors. The preview and the HTML/DOCX exports therefore follow your theme; printing and PDF export always use the light Paper palette, by design.
 
 The preview renders in the background: each diagram appears as its process finishes, results are cached per source and theme, repeated transient failures back off before being retried (the retry schedule is finite), and a source the tool outright rejects stops being retried until you edit it. Print, PDF and the HTML/DOCX exports render synchronously with bounded timeouts: print and PDF give each diagram 15 seconds with a 30-second budget for the whole document, and an HTML or DOCX export gives each fence 20 seconds with a 60-second budget per export. A wedged tool therefore degrades to source instead of hanging the document.
 
@@ -52,7 +52,7 @@ Whenever no tool is configured, a source lacks the `@startuml` anchor, or a rend
 - **The first diagram is slow, later ones are instant.** A cold Java process takes time to start. Once rendered, a diagram is cached.
 - **A diagram occasionally falls back to source.** A render that outlives its bounded timeout is abandoned and the source is shown instead: 15 seconds per diagram during print and PDF, 20 seconds per fence in HTML and DOCX exports. Large or complex diagrams can hit this; split them or use a faster tool.
 - **Embedded diagrams look soft in Word or on high-DPI screens.** The DOCX embeds the PNG at its natural 1x size. Use the copy button for the 2x image, or open the HTML export for crisp vectors.
-- **Printed diagrams do not match the dark theme.** Print always uses the light Paper palette by design; the preview and the HTML/DOCX exports keep your theme colors.
+- **Printed diagrams do not match the dark theme.** Print always uses the light Paper palette by design; the preview and the HTML/DOCX exports keep your theme colors, including the dark-palette shape fills and strokes.
 
 ## Validation fixtures
 

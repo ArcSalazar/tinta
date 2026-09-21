@@ -338,7 +338,9 @@ bool injectPreamble(std::string& source, const std::string& preambleLines) {
 }
 
 std::string preamble(const std::string& fontFamily, float fontBaseSize,
-                     const std::string& textColorHex) {
+                     const std::string& textColorHex, bool darkPalette,
+                     const std::string& fillColorHex,
+                     const std::string& strokeColorHex) {
     char sizeText[64] = {};
     if (fontBaseSize >= 0.0f && fontBaseSize <= 4096.0f &&
         static_cast<float>(static_cast<int>(fontBaseSize)) == fontBaseSize) {
@@ -355,6 +357,38 @@ std::string preamble(const std::string& fontFamily, float fontBaseSize,
     out += "skinparam defaultFontName " + fontFamily + "\n";
     out += "skinparam defaultFontSize " + std::string(sizeText) + "\n";
     out += "skinparam defaultFontColor " + textColorHex + "\n";
+    if (!darkPalette) return out;
+
+    // Dark palettes only: PlantUML's built-in light fills and dark strokes
+    // would hide the themed text (light on light) or vanish against the page
+    // (dark ink on a dark background). Theme every fill and stroke from the
+    // supplied colors so the diagram reads on the dark page: fills use the
+    // palette surface text is designed to sit on, strokes/borders/lifelines
+    // use the accent. PlantUML ignores unknown skinparam names, so the set
+    // below is deliberately generous across diagram families.
+    out += "skinparam ArrowColor " + strokeColorHex + "\n";
+    out += "skinparam ArrowFontColor " + textColorHex + "\n";
+    out += "skinparam sequenceArrowColor " + strokeColorHex + "\n";
+    out += "skinparam sequenceLifeLineBorderColor " + strokeColorHex + "\n";
+    out += "skinparam sequenceGroupBorderColor " + strokeColorHex + "\n";
+    out += "skinparam participantBackgroundColor " + fillColorHex + "\n";
+    out += "skinparam participantBorderColor " + strokeColorHex + "\n";
+    out += "skinparam actorBackgroundColor " + fillColorHex + "\n";
+    out += "skinparam actorBorderColor " + strokeColorHex + "\n";
+    out += "skinparam classBackgroundColor " + fillColorHex + "\n";
+    out += "skinparam classBorderColor " + strokeColorHex + "\n";
+    out += "skinparam usecaseBackgroundColor " + fillColorHex + "\n";
+    out += "skinparam usecaseBorderColor " + strokeColorHex + "\n";
+    out += "skinparam activityBackgroundColor " + fillColorHex + "\n";
+    out += "skinparam activityBorderColor " + strokeColorHex + "\n";
+    out += "skinparam activityDiamondBackgroundColor " + fillColorHex + "\n";
+    out += "skinparam activityDiamondBorderColor " + strokeColorHex + "\n";
+    out += "skinparam stateBackgroundColor " + fillColorHex + "\n";
+    out += "skinparam stateBorderColor " + strokeColorHex + "\n";
+    out += "skinparam objectBackgroundColor " + fillColorHex + "\n";
+    out += "skinparam componentBackgroundColor " + fillColorHex + "\n";
+    out += "skinparam noteBackgroundColor " + fillColorHex + "\n";
+    out += "skinparam noteBorderColor " + strokeColorHex + "\n";
     return out;
 }
 

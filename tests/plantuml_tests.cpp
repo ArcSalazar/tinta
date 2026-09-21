@@ -307,17 +307,21 @@ void testPreambleInjection() {
 // ------------------------------------------------------------ preamble content
 
 void testPreambleContent() {
-    const std::string p = plantuml::preamble("Segoe UI", 14.0f, "334455");
-    check(p.find("skinparam backgroundColor transparent\n") != std::string::npos,
-          "preamble declares a transparent background");
-    check(p.find("skinparam shadowing false\n") != std::string::npos,
-          "preamble disables shadowing");
-    check(p.find("skinparam defaultFontName Segoe UI\n") != std::string::npos,
-          "preamble passes the font family");
-    check(p.find("skinparam defaultFontSize 14\n") != std::string::npos,
-          "preamble prints an integral font size without decimals");
-    check(p.find("skinparam defaultFontColor 334455\n") != std::string::npos,
-          "preamble passes the text color");
+    const std::string lightExpected =
+        "skinparam backgroundColor transparent\n"
+        "skinparam shadowing false\n"
+        "skinparam defaultFontName Segoe UI\n"
+        "skinparam defaultFontSize 14\n"
+        "skinparam defaultFontColor 334455\n";
+    const std::string p = plantuml::preamble("Segoe UI", 14.0f, "334455",
+                                             false, "112233", "445566");
+    check(p == lightExpected,
+          "a light palette returns the documented five-line preamble "
+          "byte for byte");
+    check(p.find("BackgroundColor") == std::string::npos &&
+          p.find("BorderColor") == std::string::npos &&
+          p.find("ArrowColor") == std::string::npos,
+          "a light palette never themes shapes or strokes");
 
     const size_t background = p.find("backgroundColor");
     const size_t shadowing = p.find("shadowing");
@@ -330,16 +334,63 @@ void testPreambleContent() {
           shadowing < fontName && fontName < fontSize && fontSize < fontColor,
           "preamble lines keep their documented order");
 
-    const std::string fractional = plantuml::preamble("Cascadia Mono", 13.5f, "aabbcc");
+    const std::string fractional = plantuml::preamble("Cascadia Mono", 13.5f,
+                                                      "aabbcc", false, "", "");
     check(fractional.find("skinparam defaultFontSize 13.5\n") != std::string::npos,
           "a fractional font size keeps its fraction");
+
+    const std::string dark = plantuml::preamble("Segoe UI", 14.0f, "334455",
+                                                true, "112233", "445566");
+    check(dark.find(lightExpected) == 0,
+          "a dark palette keeps the light preamble as its byte-identical "
+          "prefix");
+    const char* darkLines[] = {
+        "skinparam ArrowColor 445566\n",
+        "skinparam ArrowFontColor 334455\n",
+        "skinparam sequenceArrowColor 445566\n",
+        "skinparam sequenceLifeLineBorderColor 445566\n",
+        "skinparam sequenceGroupBorderColor 445566\n",
+        "skinparam participantBackgroundColor 112233\n",
+        "skinparam participantBorderColor 445566\n",
+        "skinparam actorBackgroundColor 112233\n",
+        "skinparam actorBorderColor 445566\n",
+        "skinparam classBackgroundColor 112233\n",
+        "skinparam classBorderColor 445566\n",
+        "skinparam usecaseBackgroundColor 112233\n",
+        "skinparam usecaseBorderColor 445566\n",
+        "skinparam activityBackgroundColor 112233\n",
+        "skinparam activityBorderColor 445566\n",
+        "skinparam activityDiamondBackgroundColor 112233\n",
+        "skinparam activityDiamondBorderColor 445566\n",
+        "skinparam stateBackgroundColor 112233\n",
+        "skinparam stateBorderColor 445566\n",
+        "skinparam objectBackgroundColor 112233\n",
+        "skinparam componentBackgroundColor 112233\n",
+        "skinparam noteBackgroundColor 112233\n",
+        "skinparam noteBorderColor 445566\n",
+    };
+    bool darkComplete = true;
+    for (const char* line : darkLines) {
+        if (dark.find(line) == std::string::npos) darkComplete = false;
+    }
+    check(darkComplete,
+          "a dark palette themes every documented fill, border and stroke");
+    check(plantuml::preamble("Segoe UI", 14.0f, "334455", false, "112233",
+                             "445566") == lightExpected,
+          "a light palette ignores the dark-only color arguments");
+    check(plantuml::preamble("Segoe UI", 14.0f, "334455", true, "112233",
+                             "445566") !=
+              plantuml::preamble("Segoe UI", 14.0f, "334455", true, "aaaaaa",
+                                 "445566"),
+          "changing a dark fill color changes the dark preamble");
 }
 
 // -------------------------------------------------------------------- cache key
 
 void testCacheKey() {
     const std::string source = "@startuml\nA -> B\n@enduml\n";
-    const std::string pre = plantuml::preamble("Segoe UI", 14.0f, "112233");
+    const std::string pre =
+        plantuml::preamble("Segoe UI", 14.0f, "112233", false, "", "");
     const std::wstring tool = L"C:/tools/plantuml.exe";
     const uint64_t baseline = plantuml::cacheKey(source, pre, tool, 4242, 0);
 

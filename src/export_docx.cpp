@@ -1018,14 +1018,18 @@ bool emitPlantumlImage(DocxCtx& ctx, const std::string& source,
     const std::wstring toolPath = app.plantumlTool.isJar
                                       ? app.plantumlTool.jar
                                       : app.plantumlTool.program;
-    // Byte-identical preamble to the preview branch: family, size and text
-    // color come from the live theme through the shared role resolver, and
-    // hex6 matches render.cpp's colorHexNoHash rounding, so the same fence
-    // hashes to the same cache key in both places.
+    // Byte-identical preamble to the preview branch: family, size, text
+    // color and (on dark palettes) the fill/stroke colors come from the
+    // live theme through the shared role resolver, and hex6 matches
+    // render.cpp's colorHexNoHash rounding, so the same fence hashes to the
+    // same cache key in both places.
     mermaidext::Prim colorPrim{};
     const std::string preambleText = plantuml::preamble(
         toUtf8(app.theme.fontFamily), 14.0f,
-        hex6(resolveDiagramRole(app, colorPrim, mermaidext::Role::Text)));
+        hex6(resolveDiagramRole(app, colorPrim, mermaidext::Role::Text)),
+        app.theme.isDark,
+        hex6(resolveDiagramRole(app, colorPrim, mermaidext::Role::Fill)),
+        hex6(resolveDiagramRole(app, colorPrim, mermaidext::Role::Stroke)));
     std::string sourceWithPreamble = source;
     // No @startuml anchor: nothing to render, emit the source unchanged.
     if (!plantuml::injectPreamble(sourceWithPreamble, preambleText))

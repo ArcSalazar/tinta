@@ -2164,11 +2164,22 @@ static void layoutCodeBlock(App& app, const ElementPtr& elem, float& y, float in
             // Preamble from the live theme: family/size follow the mermaid
             // diagram conventions, the text color comes from the shared
             // role resolver so both renderers agree on the active theme.
+            // Dark palettes additionally theme shape fills and strokes from
+            // the same resolver (Fill = code surface, Stroke = accent);
+            // light palettes keep their byte-identical five-line preamble.
+            // The print layout swaps app.theme for the light Paper palette
+            // before reaching here, so printed diagrams stay on that light
+            // path by design.
             mermaidext::Prim colorPrim{};
             const std::string preambleText = plantuml::preamble(
                 wideToUtf8(app.theme.fontFamily), 14.0f,
                 colorHexNoHash(resolveDiagramRoleImpl(
-                    app, colorPrim, mermaidext::Role::Text)));
+                    app, colorPrim, mermaidext::Role::Text)),
+                app.theme.isDark,
+                colorHexNoHash(resolveDiagramRoleImpl(
+                    app, colorPrim, mermaidext::Role::Fill)),
+                colorHexNoHash(resolveDiagramRoleImpl(
+                    app, colorPrim, mermaidext::Role::Stroke)));
             std::string sourceWithPreamble = code;
             // No @startuml anchor: nothing to render, fall through to the
             // existing source-code rendering unchanged.
@@ -2231,6 +2242,9 @@ static void layoutCodeBlock(App& app, const ElementPtr& elem, float& y, float in
                 } else if (!hit && app.plantumlPrintLayout &&
                            app.plantumlPrintBudgetMsLeft > 0) {
                     // Deliberate SYNC exception: the print/PDF layout runs
+                    // under the light Paper palette (print.cpp swaps
+                    // app.theme in), so this branch always renders the
+                    // light, byte-stable preamble built above.
                     // without a message pump, so the async queue can never
                     // deliver there. Bounded per diagram by the shared
                     // budget; the interactive path never renders inline.
