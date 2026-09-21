@@ -2239,6 +2239,13 @@ static void layoutCodeBlock(App& app, const ElementPtr& elem, float& y, float in
                     // from the queue's own <workRoot>\<key> directories,
                     // where the worker may be mid-render for the same key
                     // on another thread (renderSync truncates its output).
+                    // A pumpless flow (--printpages, --exportpdf) can reach
+                    // this branch before the interactive path ever ran,
+                    // but plantumlWorkRoot is computed by
+                    // plantumlEnsureQueue(). Without it the root would be
+                    // empty and the work dir would degenerate to a drive-
+                    // relative \print-sync\<key>. Idempotent.
+                    plantumlEnsureQueue(app);
                     const std::wstring workDir = app.plantumlWorkRoot +
                         L"\\print-sync\\" + plantuml::keyHex(key);
                     // The post-print relayout at screen width reuses this
