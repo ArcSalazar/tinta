@@ -1170,6 +1170,7 @@ static bool promptSaveAsPath(App& app, HWND hwnd) {
     ofn.hwndOwner = hwnd;
     ofn.lpstrFilter = L"Markdown (*.md)\0*.md;*.markdown\0"
                       L"Mermaid (*.mmd)\0*.mmd\0"
+                      L"PlantUML (*.puml;*.plantuml)\0*.puml;*.plantuml\0"
                       L"All files (*.*)\0*.*\0";
     ofn.lpstrFile = path;
     ofn.nMaxFile = MAX_PATH;
@@ -1198,9 +1199,9 @@ void openFileDialog(App& app, HWND hwnd) {
     ofn.hwndOwner = hwnd;
     ofn.lpstrFilter = L"Documents (*.md;*.mmd;*.txt;*.json;*.yaml;...)\0"
                       L"*.md;*.markdown;*.mmd;*.txt;*.json;*.yaml;*.yml;*.toml;"
-                      L"*.ini;*.csv;*.log\0"
+                      L"*.ini;*.csv;*.log;*.puml;*.plantuml\0"
                       L"Markdown / Mermaid (*.md;*.markdown;*.mmd)\0"
-                      L"*.md;*.markdown;*.mmd\0"
+                      L"*.md;*.markdown;*.mmd;*.puml;*.plantuml\0"
                       L"All files (*.*)\0*.*\0";
     ofn.lpstrFile = path;
     ofn.nMaxFile = MAX_PATH;
