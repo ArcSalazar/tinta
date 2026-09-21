@@ -2177,6 +2177,12 @@ static void layoutCodeBlock(App& app, const ElementPtr& elem, float& y, float in
                 const uint64_t key = plantuml::cacheKey(
                     code, preambleText, toolPath,
                     plantuml::toolStampFor(toolPath), 0 /*png*/);
+                // Adopt finished renders on this (owner) thread before
+                // deciding: a relayout may run before the posted
+                // WM_APP_PLANTUML_READY is dispatched, and drainFinished()
+                // is the ONLY cache mutation point - without it an
+                // identical key misses and gets spawned again.
+                if (app.plantumlQueue) app.plantumlQueue->drainFinished();
                 auto hit = app.plantumlQueue
                                ? app.plantumlQueue->lookup(key)
                                : nullptr;
