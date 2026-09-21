@@ -1029,7 +1029,6 @@ int main(int argc, char** argv) {
     testResolveTool();
     testResolveToolWithPathSearch();
     testSettingsRoundTrip();
-    testSettingsRoundTrip();
     testRenderExitCodeOut();
     testQueueCoalescing();
     testQueueCacheHit();

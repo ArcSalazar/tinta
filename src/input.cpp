@@ -3306,11 +3306,20 @@ void handleMouseUp(App& app, HWND hwnd, WPARAM, LPARAM lParam) {
                        app.codeBlocks[app.hoveredCodeBlock].fitKey);
         app.selecting = false;
     } else if (diagramPngButtonAt(app, app.mouseX, app.mouseY)) {
-        // Diagram image button: 2x raster to the clipboard
-        if (copyDiagramImage(
-                app, hwnd,
-                toUtf8(app.codeBlocks[app.hoveredCodeBlock].codeText))) {
-            D2D1_RECT_F anchor = app.codeBlocks[app.hoveredCodeBlock].bounds;
+        // Diagram image button: 2x raster to the clipboard. A rendered
+        // PlantUML diagram already has a cached PNG - copy that instead of
+        // rebuilding mermaid prims; a miss or failure stays silent.
+        const App::CodeBlockInfo& block =
+            app.codeBlocks[app.hoveredCodeBlock];
+        if (block.isPlantuml) {
+            auto hit = app.plantumlQueue
+                           ? app.plantumlQueue->lookup(block.plantumlKey)
+                           : nullptr;
+            if (hit && hit->ok) {
+                copyPlantumlImageToClipboard(app, hit->filePath);
+            }
+        } else if (copyDiagramImage(app, hwnd, toUtf8(block.codeText))) {
+            D2D1_RECT_F anchor = block.bounds;
             signalPush(app, SIG_SUCCESS, SIGI_CHECK,
                        tr(app, "diagram.copied"), L"", L"", SIGA_NONE,
                        SIGC_NONE, true, &anchor);

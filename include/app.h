@@ -14,6 +14,7 @@
 #include <wrl/client.h>
 
 #include <string>
+#include <memory>
 #include <vector>
 #include <unordered_map>
 #include <chrono>
@@ -25,6 +26,7 @@
 #include "markdown.h"
 #include "keymap.h"
 #include "plantuml.h"
+#include "plantuml_queue.h"
 
 using namespace qmd;
 
@@ -864,6 +866,11 @@ struct App {
         unsigned fitKey = 0;      // per-layout ordinal for the fit toggle
         bool fitCandidate = false;
         bool fitActive = false;
+        // Rendered PlantUML diagram: the cached PNG's render key and
+        // format (0=png), so copy-as-image can find the image again
+        bool isPlantuml = false;
+        uint64_t plantumlKey = 0;
+        int plantumlFormat = 0;
     };
     std::vector<CodeBlockInfo> codeBlocks;
     int hoveredCodeBlock = -1;
@@ -1201,6 +1208,16 @@ struct App {
     plantuml::Tool plantumlTool;
     std::wstring plantumlUserPath;
     bool plantumlChecked = false;
+    // Async render queue (created lazily by plantumlEnsureQueue) and the
+    // per-process work root under %TEMP%; unique_ptr keeps App.h the only
+    // owner and joins the worker before exit via WM_DESTROY
+    std::unique_ptr<plantuml::PlantumlRenderQueue> plantumlQueue;
+    std::wstring plantumlWorkRoot;
+    // Print/PDF re-layouts run synchronously without a message pump: the
+    // async queue can never complete there, so the layout may render
+    // inline under this flag and the shared millisecond budget
+    bool plantumlPrintLayout = false;
+    int plantumlPrintBudgetMsLeft = 0;
 
     // Unified editor (design t11): one raw buffer, live render beside it;
     // the left tool rail slides in with edit mode carrying the controls

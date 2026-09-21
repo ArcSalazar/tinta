@@ -1592,6 +1592,134 @@ bool copyDiagramImage(App& app, HWND hwnd, const std::string& sourceUtf8) {
     return ok;
 }
 
+// Puts a rendered PlantUML PNG on the clipboard at 2x, mirroring the
+// mermaid Image button (CF_DIB plus a "PNG" stream). PlantUML renders on
+// a transparent background, so the scaled pixels are composited over the
+// active theme background before the DIB is built (CF_DIB consumers
+// ignore the alpha byte). Failure is silent: the caller shows no toast.
+bool copyPlantumlImageToClipboard(App& app, const std::wstring& pngPath) {
+    if (!app.wicFactory || pngPath.empty()) return false;
+
+    IWICBitmapDecoder* decoder = nullptr;
+    IWICBitmapFrameDecode* frame = nullptr;
+    IWICFormatConverter* converter = nullptr;
+    IWICBitmapScaler* scaler = nullptr;
+    UINT outW = 0, outH = 0;
+    std::vector<BYTE> pixels;
+
+    if (SUCCEEDED(app.wicFactory->CreateDecoderFromFilename(
+            pngPath.c_str(), nullptr, GENERIC_READ,
+            WICDecodeMetadataCacheOnDemand, &decoder)) &&
+        SUCCEEDED(decoder->GetFrame(0, &frame))) {
+        UINT w = 0, h = 0;
+        frame->GetSize(&w, &h);
+        if (w > 0 && h > 0 && w <= 8000 && h <= 8000 &&
+            SUCCEEDED(app.wicFactory->CreateFormatConverter(&converter)) &&
+            SUCCEEDED(converter->Initialize(
+                frame, GUID_WICPixelFormat32bppPBGRA,
+                WICBitmapDitherTypeNone, nullptr, 0.0,
+                WICBitmapPaletteTypeCustom)) &&
+            SUCCEEDED(app.wicFactory->CreateBitmapScaler(&scaler)) &&
+            SUCCEEDED(scaler->Initialize(converter, w * 2, h * 2,
+                                         WICBitmapInterpolationModeFant))) {
+            outW = w * 2;
+            outH = h * 2;
+            const UINT stride = outW * 4;
+            pixels.resize((size_t)stride * outH);
+            if (SUCCEEDED(scaler->CopyPixels(nullptr, stride,
+                                             (UINT)pixels.size(),
+                                             pixels.data()))) {
+                // Premultiplied source over the opaque theme background:
+                // out = src + bg * (1 - alpha), then alpha forced opaque.
+                const float bgB = app.theme.background.b * 255.0f;
+                const float bgG = app.theme.background.g * 255.0f;
+                const float bgR = app.theme.background.r * 255.0f;
+                for (size_t i = 0; i + 3 < pixels.size(); i += 4) {
+                    const float inv = 1.0f - pixels[i + 3] / 255.0f;
+                    pixels[i + 0] =
+                        (BYTE)std::min(255.0f, pixels[i + 0] + bgB * inv + 0.5f);
+                    pixels[i + 1] =
+                        (BYTE)std::min(255.0f, pixels[i + 1] + bgG * inv + 0.5f);
+                    pixels[i + 2] =
+                        (BYTE)std::min(255.0f, pixels[i + 2] + bgR * inv + 0.5f);
+                    pixels[i + 3] = 255;
+                }
+            } else {
+                pixels.clear();
+            }
+        }
+    }
+    if (scaler) scaler->Release();
+    if (converter) converter->Release();
+    if (frame) frame->Release();
+    if (decoder) decoder->Release();
+    if (pixels.empty()) return false;
+
+    // CF_DIB: header plus bottom-up 32bpp rows
+    const UINT stride = outW * 4;
+    HGLOBAL dib =
+        GlobalAlloc(GMEM_MOVEABLE, sizeof(BITMAPINFOHEADER) + pixels.size());
+    if (!dib) return false;
+    if (BYTE* out = (BYTE*)GlobalLock(dib)) {
+        BITMAPINFOHEADER hdr{};
+        hdr.biSize = sizeof(hdr);
+        hdr.biWidth = (LONG)outW;
+        hdr.biHeight = (LONG)outH;
+        hdr.biPlanes = 1;
+        hdr.biBitCount = 32;
+        hdr.biCompression = BI_RGB;
+        hdr.biSizeImage = (DWORD)pixels.size();
+        memcpy(out, &hdr, sizeof(hdr));
+        for (UINT row = 0; row < outH; row++) {
+            memcpy(out + sizeof(hdr) + (size_t)row * stride,
+                   pixels.data() + (size_t)(outH - 1 - row) * stride,
+                   stride);
+        }
+        GlobalUnlock(dib);
+    } else {
+        GlobalFree(dib);
+        return false;
+    }
+
+    HGLOBAL pngGlobal = nullptr;
+    IWICBitmap* wicBitmap = nullptr;
+    if (SUCCEEDED(app.wicFactory->CreateBitmapFromMemory(
+            outW, outH, GUID_WICPixelFormat32bppPBGRA, stride,
+            (UINT)pixels.size(), pixels.data(), &wicBitmap))) {
+        std::string png = encodeWicPng(app, wicBitmap, outW, outH);
+        wicBitmap->Release();
+        if (!png.empty()) {
+            pngGlobal = GlobalAlloc(GMEM_MOVEABLE, png.size());
+            if (pngGlobal) {
+                if (void* bits = GlobalLock(pngGlobal)) {
+                    memcpy(bits, png.data(), png.size());
+                    GlobalUnlock(pngGlobal);
+                } else {
+                    GlobalFree(pngGlobal);
+                    pngGlobal = nullptr;
+                }
+            }
+        }
+    }
+
+    if (!OpenClipboard(app.hwnd)) {
+        GlobalFree(dib);
+        if (pngGlobal) GlobalFree(pngGlobal);
+        return false;
+    }
+    EmptyClipboard();
+    bool ok = SetClipboardData(CF_DIB, dib) != nullptr;
+    if (!ok) GlobalFree(dib);
+    if (pngGlobal) {
+        UINT pngFormat = RegisterClipboardFormatW(L"PNG");
+        if (!pngFormat || !SetClipboardData(pngFormat, pngGlobal)) {
+            GlobalFree(pngGlobal);
+        }
+    }
+    CloseClipboard();
+    return ok;
+}
+
 // Ctrl+V in the editor with a bitmap on the clipboard: encode it as PNG
 // into the given file (screenshots land beside the document)
 bool clipboardImageToPngFile(App& app, HWND hwnd, const std::wstring& path) {

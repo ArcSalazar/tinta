@@ -25,4 +25,9 @@ bool plantumlAvailable(App& app);
 // remember it, re-resolve, and persist `plantumlPath` into settings.ini
 void plantumlSetUserPath(App& app, const std::wstring& path);
 
+// Lazily creates the async render queue and wires its completion callback
+// to WM_APP_PLANTUML_READY (posted FROM THE WORKER THREAD), then computes
+// the per-process work root under %TEMP% once. Idempotent.
+void plantumlEnsureQueue(App& app);
+
 #endif  // TINTA_PLANTUML_APP_H

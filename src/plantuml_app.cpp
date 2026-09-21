@@ -7,6 +7,7 @@
 #include "plantuml_app.h"
 
 #include "plantuml.h"
+#include "plantuml_queue.h"
 #include "settings.h"
 
 #include <string>
@@ -47,4 +48,29 @@ void plantumlSetUserPath(App& app, const std::wstring& path) {
     Settings settings = loadSettings();
     settings.plantumlPath = toUtf8Str(path);
     saveSettings(settings);
+}
+
+void plantumlEnsureQueue(App& app) {
+    if (app.plantumlQueue) return;
+    app.plantumlQueue = std::make_unique<plantuml::PlantumlRenderQueue>();
+
+    // The completion callback fires FROM THE WORKER THREAD: it may only
+    // marshal (PostMessageW) and must never touch App state or the cache.
+    // The HWND is captured once; it exists before any layout runs.
+    HWND hwnd = app.hwnd;
+    app.plantumlQueue->setCompletion([hwnd](uint64_t key, bool) {
+        if (hwnd) PostMessageW(hwnd, WM_APP_PLANTUML_READY, (WPARAM)key, 0);
+    });
+
+    // One work root per process; the queue names each render's directory
+    // with keyHex(key) underneath it (LRU eviction and shutdown delete them).
+    if (app.plantumlWorkRoot.empty()) {
+        wchar_t temp[MAX_PATH] = {};
+        if (GetTempPathW(MAX_PATH, temp) == 0) {
+            temp[0] = L'.';
+            temp[1] = L'\0';  // no temp path: fall back to the cwd
+        }
+        app.plantumlWorkRoot = std::wstring(temp) + L"tinta-plantuml-" +
+                               std::to_wstring(GetCurrentProcessId());
+    }
 }

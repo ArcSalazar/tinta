@@ -1686,6 +1686,23 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             else discardAsyncImage((void*)lParam);
             return 0;
 
+        case WM_APP_PLANTUML_READY:
+            // A PlantUML render finished on the worker thread. Adoption is
+            // owner-thread only: drainFinished() is the sole cache mutation
+            // point. Work-dir cleanup belongs to the queue (LRU eviction and
+            // shutdown) - nothing is deleted here; the wParam key is only a
+            // hint, the reflow re-reads the cache.
+            if (app && app->plantumlQueue) {
+                app->plantumlQueue->drainFinished();
+                // Same coalesced reflow discipline as completeAsyncImage:
+                // the TIMER handler marks the layout dirty once for however
+                // many completions arrived since it was armed.
+                if (app->hwnd) {
+                    SetTimer(app->hwnd, TIMER_IMAGE_REFLOW, 60, nullptr);
+                }
+            }
+            return 0;
+
         case WM_CONTEXTMENU:
             if (app) handleContextMenu(*app, hwnd, lParam);
             return 0;
@@ -1766,6 +1783,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             KillTimer(hwnd, TIMER_NOTIFICATION);
             KillTimer(hwnd, TIMER_ZOOM_APPLY);
             KillTimer(hwnd, TIMER_DRAFT_SAVE);
+            // Join the PlantUML worker and delete every unadopted work dir
+            // before the window goes away; later messages see a shut-down
+            // queue (not a null one) and become no-ops.
+            if (app && app->plantumlQueue) app->plantumlQueue->shutdown();
             // A graceful close resolved every dirty buffer through the
             // unsaved-changes flow; leftover drafts would resurrect
             // content the user already decided about
