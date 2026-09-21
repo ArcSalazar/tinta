@@ -277,7 +277,8 @@ if(BUILD_TESTING)
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_portable_test.cmake)
 
     add_executable(context_menu_tests tests/context_menu_tests.cpp src/context_menu.cpp
-        src/markdown.cpp src/footnotes.cpp src/themes.cpp src/config_dir.cpp)
+        src/markdown.cpp src/footnotes.cpp src/themes.cpp src/config_dir.cpp
+        src/plantuml.cpp src/plantuml_queue.cpp)
     target_include_directories(context_menu_tests PRIVATE include ${md4c_SOURCE_DIR}/src)
     target_link_libraries(context_menu_tests PRIVATE md4c shell32)
     target_compile_definitions(context_menu_tests PRIVATE UNICODE _UNICODE)
@@ -288,7 +289,8 @@ if(BUILD_TESTING)
     add_test(NAME math_parser COMMAND math_parser_tests)
 
     add_executable(math_layout_tests tests/math_layout_tests.cpp
-        src/math_parser.cpp src/math_macros.cpp src/math_render.cpp src/markdown.cpp src/footnotes.cpp src/themes.cpp src/config_dir.cpp)
+        src/math_parser.cpp src/math_macros.cpp src/math_render.cpp src/markdown.cpp src/footnotes.cpp src/themes.cpp src/config_dir.cpp
+        src/plantuml.cpp src/plantuml_queue.cpp)
     target_include_directories(math_layout_tests PRIVATE include src ${md4c_SOURCE_DIR}/src)
     target_link_libraries(math_layout_tests PRIVATE md4c d2d1 dwrite windowscodecs shell32 ole32)
     target_compile_definitions(math_layout_tests PRIVATE UNICODE _UNICODE
@@ -364,6 +366,7 @@ if(BUILD_TESTING)
         src/markdown.cpp src/footnotes.cpp
         src/themes.cpp
         src/config_dir.cpp
+        src/plantuml.cpp src/plantuml_queue.cpp
     )
     target_include_directories(inline_style_tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
