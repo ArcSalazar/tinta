@@ -839,7 +839,9 @@ void editorReparse(App& app, bool force) {
     KillTimer(app.hwnd, TIMER_EDITOR_REPARSE);
     if (!app.editMode) return;
     std::string utf8 = toUtf8(app.editorText);
-    if (!isPlainTextDocumentPath(app.currentFile) && !isMermaidDocumentPath(app.currentFile)) {
+    if (!isPlainTextDocumentPath(app.currentFile) &&
+        !isMermaidDocumentPath(app.currentFile) &&
+        !isPlantUmlDocumentPath(app.currentFile)) {
         auto metadata = fm::parse(utf8);
         if (metadata.present) observeFrontmatter(app, metadata.properties);
     }
@@ -962,7 +964,8 @@ static void enterEditModeWithContent(App& app, const std::string& content) {
     updateBlinkTimer(app);
 
     // Force layout at new width
-    app.focusMermaidOnNextLayout = isMermaidDocumentPath(app.currentFile);
+    app.focusMermaidOnNextLayout = isMermaidDocumentPath(app.currentFile) ||
+                                   isPlantUmlDocumentPath(app.currentFile);
     app.layoutDirty = true;
     InvalidateRect(app.hwnd, nullptr, FALSE);
 }
@@ -1116,7 +1119,8 @@ void exitEditMode(App& app) {
     // Update window title (remove dirty marker)
     updateWindowTitle(app);
 
-    app.focusMermaidOnNextLayout = isMermaidDocumentPath(app.currentFile);
+    app.focusMermaidOnNextLayout = isMermaidDocumentPath(app.currentFile) ||
+                                   isPlantUmlDocumentPath(app.currentFile);
     app.layoutDirty = true;
     InvalidateRect(app.hwnd, nullptr, FALSE);
 }
@@ -1350,7 +1354,9 @@ void saveEditorFile(App& app, HWND hwnd) {
     }
 
     std::string utf8 = toUtf8(app.editorText);
-    if (!isPlainTextDocumentPath(app.currentFile) && !isMermaidDocumentPath(app.currentFile))
+    if (!isPlainTextDocumentPath(app.currentFile) &&
+        !isMermaidDocumentPath(app.currentFile) &&
+        !isPlantUmlDocumentPath(app.currentFile))
         utf8 = fm::stamp(utf8, app.frontmatter, firstSeen, fm::utcNow());
     const std::wstring savedText = fromUtf8(utf8);
 

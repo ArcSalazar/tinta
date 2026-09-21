@@ -291,7 +291,8 @@ bool openDocumentInViewer(App& app, const std::wstring& fullPath) {
             updateTextFormats(app);
         }
     }
-    app.focusMermaidOnNextLayout = isMermaidDocumentPath(fullPath);
+    app.focusMermaidOnNextLayout = isMermaidDocumentPath(fullPath) ||
+                                   isPlantUmlDocumentPath(fullPath);
     app.contentHeight = 0;
     app.verticalScrollbarVisible = false;
     app.scrollbarContentHeight = 0.0f;

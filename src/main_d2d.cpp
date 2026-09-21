@@ -2231,7 +2231,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     } else if (!inputFile.empty()) {
         if (loadFile(inputFile)) {
             app.currentFile = inputFile;
-            app.focusMermaidOnNextLayout = isMermaidDocumentPath(inputFile);
+            app.focusMermaidOnNextLayout = isMermaidDocumentPath(inputFile) ||
+                                           isPlantUmlDocumentPath(inputFile);
             persistRecentFile(app.currentFile);
         } else {
             showStartPage();
@@ -2241,7 +2242,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
         if (loadFile(sessionPaths[sessionActive])) {
             app.currentFile = sessionPaths[sessionActive];
             app.focusMermaidOnNextLayout =
-                isMermaidDocumentPath(sessionPaths[sessionActive]);
+                isMermaidDocumentPath(sessionPaths[sessionActive]) ||
+                isPlantUmlDocumentPath(sessionPaths[sessionActive]);
         } else {
             showStartPage();
         }
