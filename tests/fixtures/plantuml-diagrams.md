@@ -7,11 +7,12 @@ surrounding layout is checked together with the feature itself.
 
 Expected HTML export gates:
 
-- REAL tool (plantuml.jar): exactly **4** `<div class="diagram">`
-  blocks (three valid PlantUML fences plus the mermaid control) and
-  exactly **2** `<code class="language-plantuml">` fallbacks - the
-  anchorless fence and the invalid-syntax fence (real PlantUML
-  rejects it with exit 200 under `-failfast2`);
+- REAL tool (a locally installed PlantUML jar run through Java):
+  exactly **4** diagram divs (three valid PlantUML fences plus the
+  mermaid control) and exactly **2** fallback code blocks carrying
+  the PlantUML language class - the anchorless fence and the
+  invalid-syntax fence (real PlantUML rejects it with exit 200 under
+  `-failfast2`);
 - FAKE tool: **5** diagram divs and **1** fallback - the fake does
   not parse, so it "renders" the invalid-syntax fence too; only the
   anchorless fence falls back;
@@ -26,6 +27,11 @@ Expected HTML export gates:
 
 > Quote: PlantUML renders through a locally installed tool; Tinta never
 > reaches the network for diagrams.
+
+The render queue dedupes identical sources by a content hash, so a
+repeated fence costs at most one tool run:
+
+$$k = hash(source)$$
 
 | Fence | Kind | Expected outcome |
 | --- | --- | --- |
