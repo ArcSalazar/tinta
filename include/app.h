@@ -69,6 +69,11 @@ inline int64_t usElapsed(Clock::time_point start) {
 // Pandoc worker finished; wParam = success (pandoc.cpp)
 #define WM_APP_PANDOC_DONE (WM_APP + 6)
 
+// PlantUML render-queue worker finished a render for `key`; the queue's
+// completion callback posts this from the worker thread with (WPARAM)key
+// (todo 5 wires the handler; no App state is touched here yet)
+#define WM_APP_PLANTUML_READY (WM_APP + 7)
+
 // Startup metrics
 struct StartupMetrics {
     int64_t windowInitUs = 0;

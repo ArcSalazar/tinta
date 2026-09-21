@@ -17,9 +17,11 @@
 // the user's %APPDATA%\Tinta is never touched.
 
 #include "plantuml.h"
+#include "plantuml_queue.h"
 #include "settings.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -28,7 +30,9 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <windows.h>
@@ -184,6 +188,36 @@ bool runProcess(const std::wstring& commandLine, DWORD timeoutMs, DWORD& exitCod
     CloseHandle(pi.hProcess);
     return wait == WAIT_OBJECT_0;
 }
+
+// ------------------------------------------------------------- queue helpers
+
+std::vector<std::string> readLogLines(const std::filesystem::path& logPath) {
+    std::vector<std::string> lines;
+    std::ifstream in(logPath, std::ios::binary);
+    std::string line;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (!line.empty()) lines.push_back(line);
+    }
+    return lines;
+}
+
+// Bounded polling with a clear failure message: the queue tests must never
+// hang when an expected render or retry does not arrive.
+template <typename Predicate>
+bool pollUntil(Predicate predicate, int deadlineMs, const char* failureMessage) {
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(deadlineMs);
+    for (;;) {
+        if (predicate()) return true;
+        if (std::chrono::steady_clock::now() >= deadline) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    check(false, failureMessage);
+    return false;
+}
+
+const char kQueueSource[] = "@startuml\nAlice -> Bob: queued\n@enduml\n";
 
 const std::wstring kFakeToolPath = toWide(TINTA_FAKE_PLANTUML);
 
@@ -635,6 +669,329 @@ void testNoNetworkApis() {
     }
 }
 
+// --------------------------------------------------------------- queue tests
+
+void testRenderExitCodeOut() {
+    const plantuml::Tool tool = plantuml::resolveTool(kFakeToolPath);
+    const std::string source = "@startuml\nA -> B\n@enduml\n";
+
+    {
+        const std::filesystem::path dir = freshScratch(L"exitcode-ok");
+        std::wstring out;
+        std::wstring error;
+        int exitCode = 12345;
+        const bool ok = plantuml::renderSync(tool, source, 0, dir.wstring(), out,
+                                             15000, error, &exitCode);
+        check(ok, "the exit-code probe renders successfully");
+        check(exitCode == 0, "success reports exit code 0");
+    }
+    {
+        const ScopedEnv exitEnv(L"TINTA_FAKE_PLANTUML_EXIT", L"200");
+        const std::filesystem::path dir = freshScratch(L"exitcode-200");
+        std::wstring out;
+        std::wstring error;
+        int exitCode = 12345;
+        const bool ok = plantuml::renderSync(tool, source, 0, dir.wstring(), out,
+                                             15000, error, &exitCode);
+        check(!ok, "exit 200 fails the render");
+        check(exitCode == 200, "the tool's own exit code is reported");
+    }
+    {
+        const ScopedEnv sleepEnv(L"TINTA_FAKE_PLANTUML_SLEEP_MS", L"5000");
+        const std::filesystem::path dir = freshScratch(L"exitcode-timeout");
+        std::wstring out;
+        std::wstring error;
+        int exitCode = 12345;
+        const bool ok = plantuml::renderSync(tool, source, 0, dir.wstring(), out,
+                                             500, error, &exitCode);
+        check(!ok, "the timeout probe fails");
+        check(exitCode == -1, "a timeout reports -1");
+    }
+    {
+        const plantuml::Tool unavailable;
+        const std::filesystem::path dir = freshScratch(L"exitcode-preflight");
+        std::wstring out;
+        std::wstring error;
+        int exitCode = 12345;
+        const bool ok = plantuml::renderSync(unavailable, source, 0, dir.wstring(),
+                                             out, 15000, error, &exitCode);
+        check(!ok, "an unavailable tool fails the render");
+        check(exitCode == -1, "a preflight failure reports -1");
+    }
+}
+
+void testQueueCoalescing() {
+    const plantuml::Tool tool = plantuml::resolveTool(kFakeToolPath);
+    const std::filesystem::path scratch = freshScratch(L"queue-coalesce");
+    std::filesystem::create_directories(scratch);
+    const std::filesystem::path logPath = scratch / L"spawn.log";
+    const ScopedEnv logEnv(L"TINTA_FAKE_PLANTUML_LOG", logPath.c_str());
+    const ScopedEnv sleepEnv(L"TINTA_FAKE_PLANTUML_SLEEP_MS", L"250");
+
+    plantuml::PlantumlRenderQueue queue;
+    const std::filesystem::path workRoot = scratch / L"work";
+
+    const uint64_t gateKey = 0x9A01ULL;
+    queue.request(900, gateKey, kQueueSource, 0, tool, workRoot.wstring());
+    if (!pollUntil([&] { return readLogLines(logPath).size() >= 1; }, 5000,
+                   "the gate render spawns")) {
+        return;
+    }
+
+    const uint64_t k1 = 0x1A01ULL;
+    const uint64_t k2 = 0x1A02ULL;
+    const uint64_t k3 = 0x1A03ULL;
+    queue.request(7, k1, kQueueSource, 0, tool, workRoot.wstring());
+    queue.request(7, k2, kQueueSource, 0, tool, workRoot.wstring());
+    queue.request(7, k3, kQueueSource, 0, tool, workRoot.wstring());
+    queue.waitForIdle(5000);
+
+    const std::vector<std::string> lines = readLogLines(logPath);
+    check(lines.size() == 2, "coalescing leaves exactly two spawns");
+    if (lines.size() >= 2) {
+        check(lines[1].find(toNarrow(plantuml::keyHex(k3))) != std::string::npos,
+              "the surviving spawn renders the newest key");
+        check(lines[1].find(toNarrow(plantuml::keyHex(k1))) == std::string::npos,
+              "the superseded key 1 never spawns");
+        check(lines[1].find(toNarrow(plantuml::keyHex(k2))) == std::string::npos,
+              "the superseded key 2 never spawns");
+    }
+}
+
+void testQueueCacheHit() {
+    const plantuml::Tool tool = plantuml::resolveTool(kFakeToolPath);
+    const std::filesystem::path scratch = freshScratch(L"queue-cache");
+    std::filesystem::create_directories(scratch);
+    const std::filesystem::path logPath = scratch / L"spawn.log";
+    const ScopedEnv logEnv(L"TINTA_FAKE_PLANTUML_LOG", logPath.c_str());
+
+    plantuml::PlantumlRenderQueue queue;
+    const std::filesystem::path workRoot = scratch / L"work";
+    const uint64_t key = 0x2B01ULL;
+    queue.request(1, key, kQueueSource, 0, tool, workRoot.wstring());
+    queue.waitForIdle(5000);
+
+    const std::shared_ptr<const plantuml::Cached> hit = queue.lookup(key);
+    check(hit != nullptr, "a finished render lands in the cache");
+    if (hit) {
+        check(hit->ok, "the cached entry is a success");
+        check(!hit->filePath.empty() && std::filesystem::exists(hit->filePath),
+              "the cached filePath exists on disk");
+        check(hit->spawnCount >= 1, "the cached entry counts at least one spawn");
+    }
+    const size_t before = readLogLines(logPath).size();
+    check(before == 1, "the first request spawns the tool exactly once");
+
+    queue.request(1, key, kQueueSource, 0, tool, workRoot.wstring());
+    queue.waitForIdle(5000);
+    check(readLogLines(logPath).size() == before, "a cached key never respawns");
+}
+
+void testQueueLruEviction() {
+    const plantuml::Tool tool = plantuml::resolveTool(kFakeToolPath);
+    const std::filesystem::path scratch = freshScratch(L"queue-lru");
+    std::filesystem::create_directories(scratch);
+    const std::filesystem::path logPath = scratch / L"spawn.log";
+    const ScopedEnv logEnv(L"TINTA_FAKE_PLANTUML_LOG", logPath.c_str());
+
+    plantuml::PlantumlRenderQueue queue({}, 4);
+    const std::filesystem::path workRoot = scratch / L"work";
+
+    uint64_t keys[6] = {};
+    for (int i = 0; i < 6; ++i) {
+        keys[i] = 0x3C00ULL + static_cast<uint64_t>(i);
+        queue.request(static_cast<size_t>(i), keys[i], kQueueSource, 0, tool,
+                      workRoot.wstring());
+    }
+    queue.waitForIdle(15000);
+    check(readLogLines(logPath).size() == 6, "six distinct keys spawn six times");
+
+    for (int i = 0; i < 2; ++i) {
+        check(queue.lookup(keys[i]) == nullptr,
+              "the two least recently inserted keys are evicted");
+        check(!std::filesystem::exists(workRoot / plantuml::keyHex(keys[i])),
+              "an evicted key's work directory is deleted");
+    }
+    for (int i = 2; i < 6; ++i) {
+        check(queue.lookup(keys[i]) != nullptr, "the four newest keys stay cached");
+    }
+}
+
+void testQueueBackoffRetry() {
+    const plantuml::Tool tool = plantuml::resolveTool(kFakeToolPath);
+    const std::filesystem::path scratch = freshScratch(L"queue-backoff");
+    std::filesystem::create_directories(scratch);
+    const std::filesystem::path logPath = scratch / L"spawn.log";
+    const ScopedEnv logEnv(L"TINTA_FAKE_PLANTUML_LOG", logPath.c_str());
+    const ScopedEnv exitEnv(L"TINTA_FAKE_PLANTUML_EXIT", L"200");
+
+    plantuml::BackoffConfig backoff;
+    backoff.delaysMs = {50, 80, 120};
+    plantuml::PlantumlRenderQueue queue(backoff);
+    const std::filesystem::path workRoot = scratch / L"work";
+    const uint64_t key = 0x4D01ULL;
+
+    queue.request(5, key, kQueueSource, 0, tool, workRoot.wstring());
+    if (!pollUntil([&] { return readLogLines(logPath).size() >= 1; }, 3000,
+                   "the first failing attempt spawns")) {
+        return;
+    }
+    const auto firstSeen = std::chrono::steady_clock::now();
+
+    // A duplicate request inside the window must not reset the backoff.
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    queue.request(5, key, kQueueSource, 0, tool, workRoot.wstring());
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    check(readLogLines(logPath).size() == 1,
+          "a duplicate request does not spawn inside the first window");
+
+    if (!pollUntil([&] { return readLogLines(logPath).size() >= 2; }, 800,
+                   "the first retry spawns after its window")) {
+        return;
+    }
+    const auto secondSeen = std::chrono::steady_clock::now();
+    const auto gap1 = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          secondSeen - firstSeen)
+                          .count();
+    check(gap1 >= 40, "the first retry waits out a ~50 ms window");
+
+    if (!pollUntil([&] { return readLogLines(logPath).size() >= 3; }, 800,
+                   "the second retry spawns after its window")) {
+        return;
+    }
+    const auto thirdSeen = std::chrono::steady_clock::now();
+    const auto gap2 = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          thirdSeen - secondSeen)
+                          .count();
+    check(gap2 >= 60, "the second retry waits out a ~80 ms window");
+
+    queue.shutdown();
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    check(readLogLines(logPath).size() == 3,
+          "shutdown cancels the pending third retry");
+}
+
+void testQueuePermanentFailure() {
+    const plantuml::Tool tool = plantuml::resolveTool(kFakeToolPath);
+    const std::filesystem::path scratch = freshScratch(L"queue-permanent");
+    std::filesystem::create_directories(scratch);
+    const std::filesystem::path logPath = scratch / L"spawn.log";
+    const ScopedEnv logEnv(L"TINTA_FAKE_PLANTUML_LOG", logPath.c_str());
+    const ScopedEnv exitEnv(L"TINTA_FAKE_PLANTUML_EXIT", L"100");
+
+    plantuml::PlantumlRenderQueue queue;
+    const std::filesystem::path workRoot = scratch / L"work";
+    const uint64_t keyA = 0x5E01ULL;
+    queue.request(1, keyA, kQueueSource, 0, tool, workRoot.wstring());
+    queue.waitForIdle(5000);
+
+    check(readLogLines(logPath).size() == 1, "the exit-100 key spawns once");
+    check(queue.lookup(keyA) == nullptr,
+          "a permanent failure never enters the cache");
+    check(!std::filesystem::exists(workRoot / plantuml::keyHex(keyA)),
+          "the permanent failure's work directory is removed");
+
+    queue.request(1, keyA, kQueueSource, 0, tool, workRoot.wstring());
+    queue.waitForIdle(5000);
+    check(readLogLines(logPath).size() == 1, "a permanent key is never retried");
+
+    const uint64_t keyB = 0x5E02ULL;
+    queue.request(2, keyB, kQueueSource, 0, tool, workRoot.wstring());
+    queue.waitForIdle(5000);
+    check(readLogLines(logPath).size() == 2,
+          "a new key still renders after a permanent failure");
+}
+
+void testQueueShutdown() {
+    const plantuml::Tool tool = plantuml::resolveTool(kFakeToolPath);
+    const std::filesystem::path scratch = freshScratch(L"queue-shutdown");
+    std::filesystem::create_directories(scratch);
+    const std::filesystem::path logPath = scratch / L"spawn.log";
+    const ScopedEnv logEnv(L"TINTA_FAKE_PLANTUML_LOG", logPath.c_str());
+    const ScopedEnv sleepEnv(L"TINTA_FAKE_PLANTUML_SLEEP_MS", L"300");
+
+    plantuml::PlantumlRenderQueue queue;
+    std::atomic<int> completions{0};
+    queue.setCompletion([&completions](uint64_t, bool) {
+        completions.fetch_add(1);
+    });
+    const std::filesystem::path workRoot = scratch / L"work";
+    const uint64_t key = 0x6F01ULL;
+    queue.request(1, key, kQueueSource, 0, tool, workRoot.wstring());
+    if (!pollUntil([&] { return readLogLines(logPath).size() >= 1; }, 3000,
+                   "the render to shut down spawns")) {
+        return;
+    }
+
+    const auto shutdownStart = std::chrono::steady_clock::now();
+    queue.shutdown();
+    const auto shutdownMs =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - shutdownStart)
+            .count();
+    check(shutdownMs < 2000, "shutdown joins the in-flight render promptly");
+    check(!std::filesystem::exists(workRoot / plantuml::keyHex(key)),
+          "shutdown removes the unadopted work directory");
+
+    const size_t linesAfterShutdown = readLogLines(logPath).size();
+    const uint64_t lateKey = 0x6F02ULL;
+    queue.request(2, lateKey, kQueueSource, 0, tool, workRoot.wstring());
+    const auto idleStart = std::chrono::steady_clock::now();
+    queue.waitForIdle(5000);
+    const auto idleMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - idleStart)
+                            .count();
+    check(idleMs < 500, "waitForIdle returns immediately after shutdown");
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    check(readLogLines(logPath).size() == linesAfterShutdown,
+          "a request after shutdown never spawns");
+
+    const int settled = completions.load();
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    check(completions.load() == settled,
+          "completion callbacks stop growing after shutdown");
+}
+
+void testSweepStaleTempRoots() {
+    wchar_t base[MAX_PATH] = {};
+    GetTempPathW(MAX_PATH, base);
+    const std::filesystem::path temp(base);
+    const auto oldTime =
+        std::filesystem::file_time_type::clock::now() - std::chrono::hours(48);
+
+    const std::filesystem::path stale = temp / L"tinta-plantuml-999999";
+    const std::filesystem::path live =
+        temp / (L"tinta-plantuml-" +
+                std::to_wstring(static_cast<unsigned long>(GetCurrentProcessId())));
+    const std::filesystem::path nonDigits = temp / L"tinta-plantuml-nondigits";
+
+    std::error_code ec;
+    std::filesystem::remove_all(stale, ec);
+    std::filesystem::remove_all(live, ec);
+    std::filesystem::remove_all(nonDigits, ec);
+    const std::filesystem::path targets[] = {stale, live, nonDigits};
+    for (const std::filesystem::path& dir : targets) {
+        std::filesystem::create_directories(dir, ec);
+        std::ofstream marker(dir / L"marker.txt", std::ios::binary);
+        marker << "x";
+        marker.close();
+        std::filesystem::last_write_time(dir, oldTime, ec);
+        std::filesystem::last_write_time(dir / L"marker.txt", oldTime, ec);
+    }
+
+    plantuml::sweepStaleTempRoots();
+
+    check(!std::filesystem::exists(stale),
+          "a stale digit-suffixed temp root is swept");
+    check(std::filesystem::exists(live),
+          "the live process's own temp root survives");
+    check(std::filesystem::exists(nonDigits),
+          "a non-digit suffix is never swept");
+
+    std::filesystem::remove_all(live, ec);
+    std::filesystem::remove_all(nonDigits, ec);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -672,6 +1029,15 @@ int main(int argc, char** argv) {
     testResolveTool();
     testResolveToolWithPathSearch();
     testSettingsRoundTrip();
+    testSettingsRoundTrip();
+    testRenderExitCodeOut();
+    testQueueCoalescing();
+    testQueueCacheHit();
+    testQueueLruEviction();
+    testQueueBackoffRetry();
+    testQueuePermanentFailure();
+    testQueueShutdown();
+    testSweepStaleTempRoots();
     testNoNetworkApis();
 
     if (failures == 0) {

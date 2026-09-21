@@ -273,9 +273,10 @@ std::wstring buildCommandLine(const Tool& tool, int format,
 
 bool renderSync(const Tool& tool, const std::string& sourceWithPreamble,
                 int format, const std::wstring& workDir, std::wstring& outFile,
-                DWORD timeoutMs, std::wstring& error) {
+                DWORD timeoutMs, std::wstring& error, int* exitCodeOut) {
     outFile.clear();
     error.clear();
+    if (exitCodeOut != nullptr) *exitCodeOut = -1;
     const int fmt = format == 1 ? 1 : 0;
 
     if (!tool.available || tool.program.empty() ||
@@ -352,6 +353,7 @@ bool renderSync(const Tool& tool, const std::string& sourceWithPreamble,
         return false;
     }
     if (exitCode != 0) {
+        if (exitCodeOut != nullptr) *exitCodeOut = static_cast<int>(exitCode);
         scrubWorkDir(dir);
         error = L"PlantUML exited with code " + std::to_wstring(exitCode);
         return false;
@@ -365,10 +367,12 @@ bool renderSync(const Tool& tool, const std::string& sourceWithPreamble,
         usable = !ec && size > 0;
     }
     if (!usable) {
+        if (exitCodeOut != nullptr) *exitCodeOut = static_cast<int>(exitCode);
         scrubWorkDir(dir);
         error = L"PlantUML produced no usable image (" + name + L")";
         return false;
     }
+    if (exitCodeOut != nullptr) *exitCodeOut = 0;
     outFile = artifact.wstring();
     return true;
 }

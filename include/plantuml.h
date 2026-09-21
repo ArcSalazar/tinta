@@ -121,9 +121,15 @@ std::wstring buildCommandLine(const Tool& tool, int format,
 //
 // This is the deliberate synchronous entry point used by print and export;
 // the interactive layout path must schedule it off the UI thread instead.
+//
+// `exitCodeOut`, when non-null, receives the tool's outcome: 0 on success,
+// the tool's own exit code when the run completed but failed, and -1 for a
+// timeout, a spawn failure or any preflight failure. A clean exit that
+// still produced no usable image reports its exit code (0).
 bool renderSync(const Tool& tool, const std::string& sourceWithPreamble,
                 int format, const std::wstring& workDir, std::wstring& outFile,
-                DWORD timeoutMs, std::wstring& error);
+                DWORD timeoutMs, std::wstring& error,
+                int* exitCodeOut = nullptr);
 
 }  // namespace plantuml
 

@@ -87,6 +87,7 @@ set(SOURCES
     src/editrail.cpp
     src/pandoc.cpp
     src/plantuml.cpp
+    src/plantuml_queue.cpp
     src/plantuml_app.cpp
 )
 
@@ -115,6 +116,7 @@ set(HEADERS
     include/selection.h
     include/math_render.h
     include/plantuml.h
+    include/plantuml_queue.h
     include/plantuml_app.h
 )
 
@@ -325,7 +327,8 @@ if(BUILD_TESTING)
     # on a temp settings.ini and must never touch %APPDATA%\Tinta.
     add_executable(plantuml_tests tests/plantuml_tests.cpp src/plantuml.cpp
         src/settings.cpp src/i18n.cpp src/config_dir.cpp
-        src/frontmatter.cpp src/keymap.cpp)
+        src/frontmatter.cpp src/keymap.cpp
+        src/plantuml_queue.cpp)
     target_include_directories(plantuml_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
     target_link_libraries(plantuml_tests PRIVATE shell32)
     target_compile_definitions(plantuml_tests PRIVATE UNICODE _UNICODE
