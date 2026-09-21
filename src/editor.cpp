@@ -2304,7 +2304,6 @@ void editorInsertDiagramTemplate(App& app, HWND hwnd, int kind) {
     if (kind < 0 || kind > 9) return;
     // PlantUML fences are one char wider: caret lands inside the body
     editorInsertSnippet(app, hwnd, kTemplates[kind], kind >= 7 ? 12 : 11);
-    editorInsertSnippet(app, hwnd, kTemplates[kind], 11);
 }
 
 void editorInsertSnippetPublic(App& app, HWND hwnd,
