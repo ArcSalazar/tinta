@@ -2288,8 +2288,22 @@ void editorInsertDiagramTemplate(App& app, HWND hwnd, int kind) {
         L"```mermaid\npie title Split\n    \"A\" : 60\n    \"B\" : 40\n```\n",
         // 6 empty block
         L"```mermaid\n\n```\n",
+        // 7 PlantUML sequence
+        L"```plantuml\n@startuml\nparticipant Editor\n"
+        L"participant Preview\nEditor -> Preview : render()\n"
+        L"Preview --> Editor : rendered\n@enduml\n```\n",
+        // 8 PlantUML class
+        L"```plantuml\n@startuml\nclass Document {\n"
+        L"    +title: String\n    +render()\n}\n"
+        L"Document <|-- Note\n@enduml\n```\n",
+        // 9 PlantUML activity
+        L"```plantuml\n@startuml\nstart\nif (Edited?) then (yes)\n"
+        L"    :Save file;\nelse (no)\n    :Keep editing;\n"
+        L"endif\nstop\n@enduml\n```\n",
     };
-    if (kind < 0 || kind > 6) return;
+    if (kind < 0 || kind > 9) return;
+    // PlantUML fences are one char wider: caret lands inside the body
+    editorInsertSnippet(app, hwnd, kTemplates[kind], kind >= 7 ? 12 : 11);
     editorInsertSnippet(app, hwnd, kTemplates[kind], 11);
 }
 
